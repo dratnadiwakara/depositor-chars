@@ -1,0 +1,145 @@
+---
+title: "Branch-Level-Results"
+author: "RN DR"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_collapsed: true
+    theme: united
+    number_sections: true
+    code_folding: hide
+---
+
+```{=html}
+<style type="text/css">
+.main-container {
+  max-width: 100%;
+  margin-left: auto;
+  margin-right: auto;
+}
+
+div.main-container {
+  max-width: 100%;
+}
+</style>
+```
+
+
+```{r include=FALSE}
+rm(list=ls())
+library(data.table)
+library(lfe)
+library(stargazer)
+library(ggplot2)
+library(stringr)
+library(stringi)
+library(readxl)
+library(DBI)
+library(RSQLite)
+library(dplyr)
+
+source('https://raw.githubusercontent.com/dratnadiwakara/r-utilities/main/functions.R')
+# library(quantmod)
+data_path = 'D:/OneDrive/research-data/'
+gc()
+```
+
+
+```{r}
+branch_df <- readRDS(paste0(data_path,"Dewey/reg_data/branch_df.rds"))
+```
+
+
+
+```{r}
+plot_loss_deposits <- function(data, x_var, label, color_var,legend.position="none") {
+  t <- data[abs(change_in_deposits)<0.5, .(loss_deposits = mean(change_in_deposits)), by = c("bank_size", x_var)]
+  ggplot(t, aes_string(x = x_var, y = "loss_deposits*100", color = color_var)) + 
+    geom_point(size=2)+
+    geom_smooth(method = "lm", formula = y ~ poly(x, 2), se = T)+
+    theme_minimal()+
+    theme(legend.position = legend.position,legend.title = element_blank())+
+    labs(x=label,y="Deposit change (%)")+
+    scale_color_manual(values = c("1. Less than 10b" = "dodgerblue", "2. 10 to 250b" = "firebrick", "3. More than 250b" = "forestgreen"),
+                       labels = c("Less than 10b", "10 to 250b","More than 250b"))+
+    scale_x_continuous(breaks = seq(min(t[[x_var]]), max(t[[x_var]]), by = 1)) 
+}
+
+plot_loss_deposits(branch_df, "income_decile", "Income decile", "bank_size")
+plot_loss_deposits(branch_df, "education_decile", "Education decile", "bank_size")
+plot_loss_deposits(branch_df, "age_decile", "Age decile", "bank_size")
+plot_loss_deposits(branch_df[!is.na(distance_decile)], "distance_decile", "Distance decile", "bank_size")
+plot_loss_deposits(branch_df[!is.na(dividend_decile)], "dividend_decile", "Dividends decile", "bank_size","bottom")
+plot_loss_deposits(branch_df[!is.na(refinance_decile)], "refinance_decile", "Refinance decile", "bank_size","bottom")
+
+```
+
+
+
+
+```{r}
+# https://www.etf.com/KRE
+kre_rssd <- c(107244,1068191,1037003,3242838,1099784,1132449,1094640,1074156,2734233,1145476,276579,2349815,2132932,1078846,606046,1102367,2078816,1109599,2925657,2260406,1048773,3814310,1133437,2736291,1098303,3153130,1199563,4028712,2706735,2452630,1491409,3005332,2003975,1076217,1086533,1025309,1076431,1082067,1123670,1049828,1249347,1117129,1029222,1025608,4284536,1136803,1102312,1883693,1048867,3844269,2393274,2608763,1491351,1135972,4973353,3903661,1201925,2339133,1208595,2651590,1130249,2571111,3203008,3099443,1070644,1209136,2634874,1206911,1204560,1048513,1116609,1048764,1204627,2367921,3103603,1885307,2900261,1199602,1115349,1070578,1416523,1030170,2687124,3316917,1203602,2125813,2166124,5513121,1022764,1404799,1245068,2820211,3594872,1249730,1071397,2631510,1248304,1070448,2333663,3828045,3842658,1076431,1206546,3973888,1139279,1132104,2609975,2303910,2797724,4226910,4105266,1105685,1208559,1142336,2652104,1076262,1133286,1071276,1098844,1071306,4122722,1208906,1079562,2961879,2126977,3133637,3838727,2390013, 1094828,3844269,3065617,1085013,1104231,3140288,3489594,3233126,1136803,1427239,4284536,1971693,3635319,1048867)
+```
+
+
+```{r}
+dep_var = "I(change_in_deposits*100)"
+regsample_small <- branch_df[ ASSET < 1e7  & abs(change_in_deposits)<0.5]
+regsample_med <- branch_df[ASSET > 1e7 & ASSET < 25e7  & abs(change_in_deposits)<0.5]
+regsample_large <- branch_df[ASSET > 25e7  & abs(change_in_deposits)<0.5]
+regsample_kre <- branch_df[(RSSDID %in% kre_rssd | RSSDHCR %in% kre_rssd) & abs(change_in_deposits)<0.5]
+regsample_non_kre <- branch_df[(!RSSDID %in% kre_rssd & !RSSDHCR %in% kre_rssd) & abs(change_in_deposits)<0.5]
+
+fe1 <- "RSSDID"
+fe2 <-  "STCNTYBR+RSSDID"
+
+reg_fe <- function(x_var) {
+  r <- list()
+
+  r[[1]] <- felm(as.formula(paste0(dep_var,"~ ",x_var,"  |", fe1, "| 0 |", fe1)), data = regsample_small)
+  r[[2]] <- felm(as.formula(paste0(dep_var,"~ ",x_var,"   |", fe2, "| 0 |", fe2)), data = regsample_small)
+  r[[3]] <- felm(as.formula(paste0(dep_var,"~ ",x_var,"   |", fe1, "| 0 |", fe1)), data = regsample_med)
+  r[[4]] <- felm(as.formula(paste0(dep_var,"~ ",x_var,"   |", fe2, "| 0 |", fe2)), data = regsample_med)
+  r[[5]] <- felm(as.formula(paste0(dep_var,"~ ",x_var,"   |", fe1, "| 0 |", fe1)), data = regsample_large)
+  r[[6]] <- felm(as.formula(paste0(dep_var,"~ ",x_var,"   |", fe2, "| 0 |", fe2)), data = regsample_large)
+  r[[7]] <- felm(as.formula(paste0(dep_var,"~ ",x_var,"   |", fe1, "| 0 |", fe1)), data = regsample_kre)
+  r[[8]] <- felm(as.formula(paste0(dep_var,"~ ",x_var,"   |", fe2, "| 0 |", fe2)), data = regsample_kre)
+#   r[[9]] <- felm(as.formula(paste0(dep_var,"~ ",x_var,"   |", fe1, "| 0 |", fe1)), data = regsample_non_kre)
+  # r[[10]] <- felm(as.formula(paste0(dep_var,"~ ",x_var,"   |", fe2, "| 0 |", fe2)), data = regsample_non_kre)
+  
+  stargazer(r,type="text",no.space = T,align = T,omit.stat=c("ser","f"),style = "qje",omit.table.layout = "n", dep.var.labels.include = FALSE)
+}
+```
+
+
+```{r}
+reg_fe("sophisticated")
+reg_fe("I(mean_family_income/10000)")
+reg_fe("I(college_or_higher_frac*100)")
+reg_fe("median_age")
+reg_fe("I(DISTANCE_FROM_HOME/1000)")
+reg_fe("I(dividend_frac*100)")
+reg_fe("I(refinance_rate*100)")
+
+```
+
+
+
+
+
+```{r}
+sodhw <- fread(paste0(data_path,"SOD/data/ALL_2022.csv"),select = c("UNINUMBR","SIMS_LATITUDE","SIMS_LONGITUDE","RSSDID"))
+sodhw <- sodhw[RSSDID==12311]
+sodhw[,RSSDID:=NULL]
+
+
+hw <- branch_df[RSSDID==12311& abs(change_in_deposits)<0.75,c("UNINUMBR","median_age","mean_family_income","college_or_higher_frac","dividend_frac","change_in_deposits")]
+hw <- merge(hw,sodhw,by="UNINUMBR")
+
+
+ggplot(hw,aes(x=change_in_deposits))+geom_density()
+```
+
