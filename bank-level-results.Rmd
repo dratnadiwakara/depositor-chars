@@ -1,0 +1,549 @@
+---
+title: "Bank Level Results"
+author: "Dimuthu Ratnadiwakara"
+date: "2024-08-17"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    toc_collapsed: true
+    theme: united
+    number_sections: true
+    code_folding: hide
+---
+
+```{=html}
+<style type="text/css">
+.main-container {
+  max-width: 100%;
+  margin-left: auto;
+  margin-right: auto;
+}
+
+div.main-container {
+  max-width: 100%;
+}
+</style>
+```
+
+
+
+```{r}
+rm(list=ls())
+library(data.table)
+library(ggplot2)
+library(dplyr)
+library(stringr)
+library(lfe)
+library(stargazer)
+library(RSQLite)
+library(DBI)
+source('https://raw.githubusercontent.com/dratnadiwakara/r-utilities/main/functions.R')
+
+data_path = 'D:/OneDrive/research-data/'
+```
+
+```{r}
+round_values <- function(x) {
+  ifelse(x > 100, round(x, 0), ifelse(x > 10, round(x, 1), round(x, 2)))
+}
+```
+
+
+
+```{r}
+bank_wa_mean_data <- readRDS(paste0(data_path,"Dewey/reg_data/bank_wa_mean_data.rds"))
+
+
+call_st <- readRDS(paste0(data_path,"Dewey/reg_data/call_st.rds"))
+
+call_ts <- readRDS(paste0(data_path,"Dewey/reg_data/call_ts.rds"))
+
+call <- readRDS("D:/OneDrive/research-data/Dewey/reg_data/call.rds")
+```
+
+
+
+```{r}
+columns_to_include <- c('median_age','mean_family_income','college_or_higher_frac_100','white_fraction_100','internet_frac_100','computer_frac_100','owner_occ_frac_100','DISTANCE_FROM_HOME','dividend_frac_100','capital_gain_frac_100','refinance_rate_100',"loans_total","core_deposits","time_deposits","deposits_domestic_uninsured","deposits_domestic_insured","deposits_loan","nim","roe","interest_expense_to_assets_2","interest_income_to_assets_2","non_int_exp_100") #,'deposits_state_hhi','deposits_college_hhi','deposits_income_hhi'
+
+# result_table <- bank_wa_mean_data[!is.na(bank_size), lapply(.SD, function(x) list(Mean = mean(x, na.rm = TRUE))), by = bank_size, .SDcols = columns_to_include]
+result_table <- bank_wa_mean_data[!is.na(bank_size), lapply(.SD, function(x) {
+  list(Mean = mean(x, na.rm = TRUE))
+}), by = bank_size, .SDcols = columns_to_include]
+
+
+
+
+setorder(result_table,bank_size)
+
+transposed_result_table <- t(result_table)
+
+colnames(transposed_result_table) <- unlist(transposed_result_table[1,])
+
+transposed_result_table <- transposed_result_table[-1,]
+
+transposed_result_table <- cbind(rownames(transposed_result_table), transposed_result_table)
+
+transposed_result_table <- as.data.table(transposed_result_table)
+
+transposed_result_table <- data.frame(lapply(transposed_result_table, function(x) unlist(x, use.names = FALSE)))
+
+transposed_result_table <- data.table(transposed_result_table)
+
+numeric_cols <- names(transposed_result_table)[sapply(transposed_result_table, is.numeric)]
+
+transposed_result_table[, (numeric_cols) := lapply(.SD, round_values), .SDcols = numeric_cols]
+
+print(transposed_result_table)
+
+stargazer(transposed_result_table,summary=F,type="text")
+
+
+```
+
+
+
+```{r}
+create_density_plot <- function(data, variable,max_quin=0.99,
+                                colors = c("1. Less than 10b"="skyblue", "2. More than 10b"="dodgerblue4")) {
+  group_var = "bank_size2"
+  quantile_range <- quantile(data[[variable]], c(0.005, max_quin), na.rm = TRUE)
+  
+  ggplot(data[data[[variable]] >= quantile_range[1] & data[[variable]] <= quantile_range[2], ], aes(x = !!sym(variable), fill = !!sym(group_var))) +
+    geom_density(alpha = 0.75) +
+    labs(title = "", x = "", y = "") +
+    scale_fill_manual(values = colors, labels = c("1. Less than 10b"="Less than $10bn", "2. More than 10b"="Greater than $10bn")) + 
+    theme_minimal() +
+    theme(axis.text.y = element_blank(),legend.position = "none", legend.title = element_blank()) #.position = "bottom", legend.title = element_blank()
+}
+```
+
+
+```{r}
+create_density_plot(call_st, "mean_family_income")
+create_density_plot(call_st, "college_or_higher_frac_100")
+create_density_plot(call_st, "median_age")
+create_density_plot(call_st, "dividend_frac_100")
+create_density_plot(call_st, "refinance_rate_100")
+create_density_plot(call_st, "DISTANCE_FROM_HOME")
+```
+
+
+
+
+
+```{r}
+create_density_plot(call_st, "interest_expense_to_assets_2",1)
+create_density_plot(call_st, "chg_interest_expense_to_assets",1)
+```
+
+```{r}
+plot_beta <- function(bin_name,bin_label,legend.position="none") {
+  x_vars <- c("chg_interest_expense_to_assets")#, "chg_core_deposits_100","chg_roe","chg_interest_income_to_assets","chg_nim")
+  x_vars_labels <- expression(Delta~"IntExp")#, "Change in Core Deposits (%)","Change ROE","Change in Interest Income/Assets","NIM")
+
+  call_st[, bincat := get(bin_name)]  # Create the bin column
+
+  for (x_var in x_vars) {
+    # print(t)
+    t <- call_st[, .(x = mean(get(x_var), na.rm = TRUE)), by = .(bincat,bank_size2)]
+    print(ggplot(t[!is.na(bincat)], aes(x = bincat, y = x,color=bank_size2)) +
+            geom_point() +
+            geom_smooth(method = "lm", formula = y ~ poly(x, 2), se = T)+
+            scale_color_manual(values = c("1. Less than 10b"="skyblue", "2. More than 10b"="dodgerblue4"),
+                              labels = c("1. Less than 10b"="Less than $10bn", "2. More than 10b"="Greater than $10bn")) + 
+            labs(x = bin_label, y = x_vars_labels[which(x_vars == x_var)])+
+            scale_x_continuous(breaks = 1:10)+
+            theme_minimal()+
+            theme(legend.position = legend.position, legend.title = element_blank())
+            )
+  }
+}
+```
+
+
+
+
+
+```{r}
+plot_beta("income_bin","Income Decile")
+plot_beta("education_bin","Education Decile")
+plot_beta("age_bin","Age Decile")
+plot_beta("distance_bin","Distance Decile")
+plot_beta("dividend_bin","Dividend Decile","bottom")
+plot_beta("refinance_bin","Refinance Decile","bottom")
+```
+
+
+
+
+```{r}
+run_regressions_exp <- function(outputtype="text",min_asset,max_asset,dep_var,web_branch,robust=FALSE) {
+  # dep_var <- "chg_interest_expense_to_deposits"
+  controls <- "+log(assets_total)+equity_assets+bank_hhi|bank_size"
+  
+  r <- list()
+  
+  
+  r[[1]] <- felm(as.formula(paste0(dep_var,"~","sophisticated",controls)),data=call_st[assets_total>=min_asset & assets_total<=max_asset & web_branch_pctile %in% web_branch ])
+  
+  
+  call_st[,qt:=mean_family_income_quartile2]
+  r[[2]] <- felm(as.formula(paste0(dep_var,"~","factor(qt)",controls)),data=call_st[assets_total>=min_asset & assets_total<=max_asset & web_branch_pctile %in% web_branch ])
+  
+  call_st[,qt:=college_or_higher_frac_quartile2]
+  r[[3]] <- felm(as.formula(paste0(dep_var,"~","factor(qt)",controls)),data=call_st[assets_total>=min_asset & assets_total<=max_asset & web_branch_pctile %in%web_branch])
+  
+  call_st[,qt:=median_age_quartile2]
+  r[[4]] <- felm(as.formula(paste0(dep_var,"~","factor(qt)",controls)),data=call_st[assets_total>=min_asset & assets_total<=max_asset & web_branch_pctile%in%web_branch])
+  
+  call_st[,qt:=dividend_frac_quartile2]
+  r[[5]] <- felm(as.formula(paste0(dep_var,"~","factor(qt)",controls)),data=call_st[assets_total>=min_asset & assets_total<=max_asset & web_branch_pctile%in%web_branch ])
+  
+  
+  call_st[,qt:=refinance_rate_quartile2]
+  r[[6]] <- felm(as.formula(paste0(dep_var,"~","factor(qt)",controls)),data=call_st[assets_total>=min_asset & assets_total<=max_asset & web_branch_pctile%in%web_branch])
+    
+  
+  call_st[,qt:=DISTANCE_FROM_HOME_quartile2]
+  r[[7]] <- felm(as.formula(paste0(dep_var,"~","factor(qt)",controls)),data=call_st[assets_total>=min_asset & assets_total<=max_asset & web_branch_pctile%in%web_branch])
+
+
+  stargazer(r,type=outputtype,no.space = T,align = T,omit.stat=c("ser","f"),style = "qje",omit.table.layout = "n",
+            column.labels = c("","Income/1000","College educated ","Age","Dividend","Refinance","Distance","All"),
+            dep.var.labels.include = F,
+            covariate.labels = c("Sophisticated","Q2","Q3","Q4","log(Assets)","Equity/Assets","Bank HHI"))
+}
+
+```
+
+
+```{r}
+run_regressions_exp("text",0,10e6,"chg_interest_expense_to_assets",1:100)
+run_regressions_exp("text",10e6,25e7,"chg_interest_expense_to_assets",1:100)
+```
+
+
+```{r}
+r <- list()
+
+r[[1]] <- felm(interest_expense_to_assets~sophisticated*factor(qtrs_since)+log(assets_total)|IDRSSD+qtrs_since|0|IDRSSD,data=call_ts[is.finite(chg_interest_expense_to_assets) & abs(chg_interest_expense_to_assets)<5 & qtrs_since>= -6 & qtrs_since<=8])
+
+
+
+coef_plot_1reg(r[[1]],"sophisticated:factor(qtrs_since)",-6)+labs(x="Quarters since 2021-Q4")
+```
+
+
+
+
+```{r}
+r <- list()
+
+# r[[1]] <- felm(chg_core_deposits~sophisticated*factor(qtrs_since)+interest_expense_to_assets_1+log(assets_total)|IDRSSD+qtrs_since|0|IDRSSD,data=call_ts[is.finite(chg_core_deposits) & abs(chg_core_deposits)<0.5])
+# r[[2]] <- felm(chg_deposits_domestic~sophisticated*factor(qtrs_since)+interest_expense_to_assets_1+log(assets_total)|IDRSSD+qtrs_since|0|IDRSSD,data=call_ts[is.finite(chg_deposits_domestic) & abs(chg_deposits_domestic)<0.5])
+r[[1]] <- felm(log(core_deposits)~sophisticated*factor(qtrs_since)+interest_expense_to_assets_1+log(assets_total)|IDRSSD+qtrs_since|0|IDRSSD,data=call_ts[is.finite(chg_deposits_domestic) & abs(chg_deposits_domestic)<0.5 & core_deposits>0 & assets_total<1e7 & qtrs_since>= -6 & qtrs_since<=8])
+# r[[4]] <- felm(log(core_deposits)~sophisticated*factor(qtrs_since)|IDRSSD+qtrs_since+log(assets_total)|0|IDRSSD,data=call_ts[is.finite(chg_deposits_domestic) & abs(chg_deposits_domestic)<0.5 & core_deposits>0 & assets_total>1e7])
+
+
+
+# stargazer(r,type="text",no.space = T)
+
+# coef_plot_1reg(r[[1]],"sophisticated:factor(qtrs_since)",-14)
+# coef_plot_1reg(r[[2]],"sophisticated:factor(qtrs_since)",-14)
+coef_plot_1reg(r[[1]],"sophisticated:factor(qtrs_since)",-6)
+# coef_plot_1reg(r[[4]],"sophisticated:factor(qtrs_since)",-14)
+```
+
+```{r}
+run_regressions_by_web <- function(outputtype="text",rhs,value=4) {
+  dep_var <- "chg_interest_expense_to_assets"
+  controls <- "+log(assets_total)+equity_assets+bank_hhi|bank_size"
+  
+  r <- list()
+
+    r[[1]] <- felm(as.formula(paste0(dep_var,"~","I(",rhs,"==",value,")",controls)),data=call_st[web_branch_pctile %in% 1:49 & assets_total>=10e6])
+    r[[2]] <- felm(as.formula(paste0(dep_var,"~","I(",rhs,"==",value,")",controls)),data=call_st[web_branch_pctile %in% 50:100 & assets_total>=10e6])
+  
+    r[[3]] <- felm(as.formula(paste0(dep_var,"~","I(",rhs,"==",value,")",controls)),data=call_st[web_branch_pctile %in% 1:33 & assets_total<10e6])
+    r[[4]] <- felm(as.formula(paste0(dep_var,"~","I(",rhs,"==",value,")",controls)),data=call_st[web_branch_pctile %in% 34:66 & assets_total<10e6])
+    r[[5]] <- felm(as.formula(paste0(dep_var,"~","I(",rhs,"==",value,")",controls)),data=call_st[web_branch_pctile %in% 67:100 & assets_total<10e6])
+
+  stargazer(r,type=outputtype,no.space = T,align = T,omit.stat=c("ser","f"),style = "qje",omit.table.layout = "n",
+            column.labels = c("< median","> median ","Bottom third","Middle third","Top third"),
+            dep.var.labels.include = F,
+            covariate.labels = c("=Q4","log(Assets)","Equity/Assets","Bank HHI"))
+}
+run_regressions_by_web("text","sophisticated",1)
+run_regressions_by_web("text","mean_family_income_quartile2")
+run_regressions_by_web("text","college_or_higher_frac_quartile2")
+run_regressions_by_web("text","median_age_quartile2")
+run_regressions_by_web("text","dividend_frac_quartile2")
+run_regressions_by_web("text","refinance_rate_quartile2")
+run_regressions_by_web("text","DISTANCE_FROM_HOME_quartile2")
+```
+
+```{r}
+calculate_quantiles <- function(data, var_names) {
+  # Ensure the data is a data.table
+  setDT(data)
+  
+  # Loop through each variable and calculate quantiles
+  results <- lapply(var_names, function(var) {
+    quantiles <- data[, .(
+      p10 = round(quantile(get(var), 0.1, na.rm = TRUE),2),
+      p25 = round(quantile(get(var), 0.25, na.rm = TRUE),2),
+      p50 = round(quantile(get(var), 0.5, na.rm = TRUE),2),
+      p75 = round(quantile(get(var), 0.75, na.rm = TRUE),2),
+      p90 = round(quantile(get(var), 0.9, na.rm = TRUE),2)
+    ), by = bank_size2]
+    # Add the variable name as a column
+    quantiles[, Variable := var]
+    return(quantiles)
+  })
+  
+  # Combine results for all variables
+  combined_results <- rbindlist(results, use.names = TRUE)
+   setcolorder(combined_results, c("Variable", setdiff(names(combined_results), "Variable")))
+  
+  # Print results
+  return(combined_results)
+}
+
+
+dep_change <- calculate_quantiles(call_st, c("chg_core_deposits_100", "chg_unins_100","chg_ins_100","chg_time_deposits_100"))
+
+
+stargazer(dep_change,summary = F,type="text",rownames = F)
+```
+
+
+```{r}
+create_density_plot(call_st, "chg_core_deposits_100")
+create_density_plot(call_st, "chg_unins_100")
+create_density_plot(call_st, "chg_ins_100")
+create_density_plot(call_st, "chg_time_deposits_100")
+```
+
+```{r}
+run_regressions_deposits <- function(x_var,outputtype="text",min_assets,max_assets) {
+  controls <- "+log(assets_total)+equity_assets+bank_hhi"
+  reg_sample <- call_st[assets_total>=min_assets & assets_total<= max_assets]
+  reg_sample2 <- call_st[assets_total>=max_assets]
+  r <- list(
+    felm(as.formula(paste0("I(chg_core_deposits*100)~",x_var,controls)),data=reg_sample[abs(chg_core_deposits) < 0.5]),
+    felm(as.formula(paste0("I(chg_unins*100)~",x_var,controls)),data=reg_sample[is.finite(chg_unins) & abs(chg_unins) < 0.5 ]),
+    felm(as.formula(paste0("I(chg_ins*100)~",x_var,controls)),data=reg_sample[is.finite(chg_ins) & abs(chg_ins) < 0.5]),
+    felm(as.formula(paste0("I(chg_time_deposits*100)~",x_var,controls)),data=reg_sample[is.finite(chg_time_deposits) & abs(chg_time_deposits) < 0.5]),
+    felm(as.formula(paste0("I(chg_core_deposits*100)~",x_var,controls)),data=reg_sample2[abs(chg_core_deposits) < 0.5]),
+    felm(as.formula(paste0("I(chg_unins*100)~",x_var,controls)),data=reg_sample2[is.finite(chg_unins) & abs(chg_unins) < 0.5 ]),
+    felm(as.formula(paste0("I(chg_ins*100)~",x_var,controls)),data=reg_sample2[is.finite(chg_ins) & abs(chg_ins) < 0.5]),
+    felm(as.formula(paste0("I(chg_time_deposits*100)~",x_var,controls)),data=reg_sample2[is.finite(chg_time_deposits) & abs(chg_time_deposits) < 1])
+    
+  )
+  
+  stargazer(r,type=outputtype,no.space = T,align = T,omit.stat=c("ser","f"),style = "qje",omit.table.layout = "n",
+            dep.var.labels =  c("Core","Uninsued","Insured","Time","Core","Uninsued","Insured","Time"))
+}
+
+run_regressions_deposits("sophisticated","text",0,10e6)
+run_regressions_deposits("I(mean_family_income/10000)","text",0,10e6)
+run_regressions_deposits("college_or_higher_frac_100","text",0,10e6)
+run_regressions_deposits("median_age","text",0,10e6)
+run_regressions_deposits("dividend_frac_100","text",0,10e6)
+run_regressions_deposits("refinance_rate_100","text",0,10e6)
+run_regressions_deposits("I(DISTANCE_FROM_HOME/1000)","text",0,10e6)
+
+
+```
+
+```{r}
+run_regressions_expenditure <- function(outputtype="text",min_assets,max_assets) {
+  dep_var <- "I(chg_non_int_exp*100)~"
+  controls <- "+log(assets_total)+equity_assets+bank_hhi"
+  reg_sample <- call_st[assets_total>=min_assets & assets_total<= max_assets]
+  r <- list(
+    felm(as.formula(paste0(dep_var,"sophisticated",controls)),data=reg_sample),
+    felm(as.formula(paste0(dep_var,"I(mean_family_income/10000)",controls)),data=reg_sample),
+    felm(as.formula(paste0(dep_var,"college_or_higher_frac_100",controls)),data=reg_sample),
+    felm(as.formula(paste0(dep_var,"median_age",controls)),data=reg_sample),
+    felm(as.formula(paste0(dep_var,"dividend_frac_100",controls)),data=reg_sample),
+    felm(as.formula(paste0(dep_var,"refinance_rate_100",controls)),data=reg_sample),
+    felm(as.formula(paste0(dep_var,"I(DISTANCE_FROM_HOME/1000)",controls)),data=reg_sample)
+  )
+  
+  stargazer(r,type=outputtype,no.space = T,align = T,omit.stat=c("ser","f"),style = "qje",omit.table.layout = "n",
+            dep.var.labels.include = F)
+}
+
+
+# run_regressions_expenditure("text",0,10e6)
+run_regressions_expenditure("text",0,10000e6)
+```
+
+```{r}
+call_st <- call[date=="2021-12-31",
+                c("IDRSSD","deposits_domestic","assets_total","core_deposits",
+                  "interest_on_domestic_deposits","equity_assets",
+                  "non_int_exp","interest_expense_to_assets","interest_income_to_assets")]
+
+call_ed <- call[date=="2023-12-31",
+                c("IDRSSD","deposits_domestic","assets_total","core_deposits",
+                  "interest_on_domestic_deposits",
+                  "non_int_exp","interest_expense_to_assets","interest_income_to_assets")]
+
+exclude_columns <- "IDRSSD"
+setnames(call_ed, setdiff(names(call_ed), exclude_columns), paste0(names(call_ed)[-which(names(call_ed) == exclude_columns)], "_2"))
+
+call_st <- merge(call_st,call_ed,by="IDRSSD")
+
+
+
+call_st[,chg_deposits_domestic:=(core_deposits_2-core_deposits)/core_deposits]
+call_st[,chg_interest_expense_to_assets:=(interest_expense_to_assets_2-interest_expense_to_assets)]
+call_st[,chg_interest_income_to_assets:=(interest_income_to_assets_2-interest_income_to_assets)]
+call_st[,int_exp_assets:=non_int_exp_2/assets_total]
+
+call_st <- merge(call_st,bank_wa_mean_data[,c("mean_family_income_quartile2","dividend_frac_quartile2","college_or_higher_frac_quartile2","RSSDID")],by.x="IDRSSD",by.y="RSSDID")
+# call_st <- merge(call_st,hhi,by.x="IDRSSD",by.y="RSSDID",all.x=T)
+
+
+
+
+call_st[,bank_size:=ifelse(assets_total<10e6,"small","large")]
+call_st[,sophisticated:=ifelse(college_or_higher_frac_quartile2>=3 & mean_family_income_quartile2>=3  & dividend_frac_quartile2>=3,1,0)]
+# call_st[,notsophisticated:=ifelse(college_or_higher_frac_quartile2<3 & mean_family_income_quartile2<3 & dividend_frac_quartile2<3,1,0)]
+
+# call_st[,bank_type:=ifelse(bank_size=="small" & sophisticated==1 ,"1.1smallxsophisticated",
+#                      ifelse(bank_size=="small" & sophisticated==0 & notsophisticated==0,"1.2smallxother",
+#                       ifelse(bank_size=="small" & notsophisticated==1,"1.3smallxnotsophisticated",
+#                        ifelse(bank_size=="large" & sophisticated==1 ,"2.1largexsophisticated",
+#                         ifelse(bank_size=="large" & sophisticated==0 & notsophisticated==0,"2.2largexother",
+#                          ifelse(bank_size=="large" & notsophisticated==1,"2.3largexnotsophisticated",NA))))))]
+
+call_st[,bank_type:=ifelse(bank_size=="small" & sophisticated==1 ,"1.1smallxsophisticated",
+                     ifelse(bank_size=="small" & sophisticated==0 , "1.3smallxnotsophisticated",
+                       ifelse(bank_size=="large" & sophisticated==1 ,"2.1largexsophisticated",
+                        ifelse(bank_size=="large" & sophisticated==0 ,"2.3largexnotsophisticated",NA))))]
+                         
+
+```
+
+
+
+
+
+```{r}
+call_st <- call[date=="2021-12-31",
+                c("IDRSSD","deposits_domestic","assets_total","core_deposits",
+                  "interest_on_domestic_deposits","equity_assets",
+                  "non_int_exp","interest_expense_to_assets","interest_income_to_assets")]
+
+call_ed <- call[date=="2023-12-31",
+                c("IDRSSD","deposits_domestic","assets_total","core_deposits",
+                  "interest_on_domestic_deposits",
+                  "non_int_exp","interest_expense_to_assets","interest_income_to_assets")]
+
+exclude_columns <- "IDRSSD"
+setnames(call_ed, setdiff(names(call_ed), exclude_columns), paste0(names(call_ed)[-which(names(call_ed) == exclude_columns)], "_2"))
+
+call_st <- merge(call_st,call_ed,by="IDRSSD")
+
+
+
+call_st[,chg_deposits_domestic:=(core_deposits_2-core_deposits)/core_deposits]
+call_st[,chg_interest_expense_to_assets:=(interest_expense_to_assets_2-interest_expense_to_assets)]
+call_st[,chg_interest_income_to_assets:=(interest_income_to_assets_2-interest_income_to_assets)]
+call_st[,int_exp_assets:=non_int_exp_2/assets_total]
+
+call_st <- merge(call_st,bank_wa_mean_data[,c("mean_family_income_quartile2","dividend_frac_quartile2","college_or_higher_frac_quartile2","RSSDID")],by.x="IDRSSD",by.y="RSSDID")
+# call_st <- merge(call_st,hhi,by.x="IDRSSD",by.y="RSSDID",all.x=T)
+
+
+
+
+call_st[,bank_size:=ifelse(assets_total<10e6,"small","large")]
+call_st[,sophisticated:=ifelse(college_or_higher_frac_quartile2>=3 & mean_family_income_quartile2>=3  & dividend_frac_quartile2>=3,1,0)]
+# call_st[,notsophisticated:=ifelse(college_or_higher_frac_quartile2<3 & mean_family_income_quartile2<3 & dividend_frac_quartile2<3,1,0)]
+
+# call_st[,bank_type:=ifelse(bank_size=="small" & sophisticated==1 ,"1.1smallxsophisticated",
+#                      ifelse(bank_size=="small" & sophisticated==0 & notsophisticated==0,"1.2smallxother",
+#                       ifelse(bank_size=="small" & notsophisticated==1,"1.3smallxnotsophisticated",
+#                        ifelse(bank_size=="large" & sophisticated==1 ,"2.1largexsophisticated",
+#                         ifelse(bank_size=="large" & sophisticated==0 & notsophisticated==0,"2.2largexother",
+#                          ifelse(bank_size=="large" & notsophisticated==1,"2.3largexnotsophisticated",NA))))))]
+
+call_st[,bank_type:=ifelse(bank_size=="small" & sophisticated==1 ,"1.1smallxsophisticated",
+                     ifelse(bank_size=="small" & sophisticated==0 , "1.3smallxnotsophisticated",
+                       ifelse(bank_size=="large" & sophisticated==1 ,"2.1largexsophisticated",
+                        ifelse(bank_size=="large" & sophisticated==0 ,"2.3largexnotsophisticated",NA))))]
+                         
+
+```
+
+
+
+
+```{r}
+bank_type_estimates <- call_st[!is.na(bank_type) & assets_total_2<250e6 & chg_deposits_domestic> - 0.5 & chg_deposits_domestic<0.5 & int_exp_assets>0.01 & int_exp_assets<0.06,
+                                .(no_banks = .N,
+                                  assets_total = sum(assets_total,na.rm=T)/1e6,
+                                  total_deposits=sum(deposits_domestic,na.rm=T)/1e6,
+                                  total_equity=sum(equity_assets*assets_total,na.rm=T)/1e6,
+                                  expbeta = mean(chg_interest_expense_to_assets,na.rm=T)/5.33,
+                                  deposit_change = mean(chg_deposits_domestic,na.rm=T)*100,
+                                  c = mean(int_exp_assets,na.rm=T)*100
+                                  ),
+                               by=bank_type]
+
+bank_type_estimates[, bank_size := substr(sapply(strsplit(bank_type, "x"), function(x) x[1]),4,20)]
+
+
+bank_type_estimates[,asset_drop:=assets_total*0.03*4]
+bank_type_estimates[,fv:=total_deposits*(1-expbeta)*0.0533]
+bank_type_estimates[,time:=asset_drop/fv]
+bank_type_estimates[,w:=deposit_change]
+# bank_type_estimates[,w:=max(deposit_change),by=bank_size]
+# bank_type_estimates[,w:=deposit_change-w]
+# bank_type_estimates[,w:=ifelse(bank_size=="large",0,w)]
+# bank_type_estimates[,c:=ifelse(bank_size=="large",2,c)]
+bank_type_estimates[,franchise_factor:=(1-(w/100))*(1-expbeta-(c/100)/0.0533)]
+bank_type_estimates[,franchise_value:=total_deposits*franchise_factor]
+bank_type_estimates[,franchise_asset_drop:=asset_drop/(franchise_value*0.0533)]
+setorder(bank_type_estimates,bank_type)
+bank_type_estimates
+
+
+```
+
+
+```{r}
+
+transposed_result_table <- t(bank_type_estimates)
+
+colnames(transposed_result_table) <- unlist(transposed_result_table[1,])
+
+transposed_result_table <- transposed_result_table[-1,]
+
+transposed_result_table <- cbind(rownames(transposed_result_table), transposed_result_table)
+
+transposed_result_table <- as.data.table(transposed_result_table)
+
+transposed_result_table <- data.frame(lapply(transposed_result_table, function(x) unlist(x, use.names = FALSE)))
+
+transposed_result_table <- data.table(transposed_result_table)
+transposed_result_table[, names(transposed_result_table) := lapply(.SD, as.numeric)]
+
+numeric_cols <- names(transposed_result_table)[sapply(transposed_result_table, is.numeric)]
+
+transposed_result_table[, (numeric_cols) := lapply(.SD, round_values), .SDcols = numeric_cols]
+
+# print(transposed_result_table)
+
+transposed_result_table <- data.table(transposed_result_table)
+
+stargazer(round(transposed_result_table,3),type="text",summary = F,rownames = F)
+```
+
+

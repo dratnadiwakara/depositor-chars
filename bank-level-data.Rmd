@@ -1,0 +1,815 @@
+---
+title: "Bank-Level"
+author: "RN DR"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_collapsed: true
+    theme: united
+    number_sections: true
+    code_folding: hide
+---
+
+```{=html}
+<style type="text/css">
+.main-container {
+  max-width: 100%;
+  margin-left: auto;
+  margin-right: auto;
+}
+
+div.main-container {
+  max-width: 100%;
+}
+</style>
+```
+
+
+
+
+```{r}
+rm(list=ls())
+library(data.table)
+library(ggplot2)
+library(dplyr)
+library(stringr)
+library(lfe)
+library(stargazer)
+library(RSQLite)
+library(DBI)
+
+
+data_path = 'D:/OneDrive/research-data/'
+```
+
+
+```{r}
+poi_sod <- fread(paste0(data_path,"Dewey/poi_sod_4.csv.gz"))
+poi_sod <- poi_sod[,c("CERT","UNINUMBR","NAMEFULL","usps_address","full_address_sod","LOCATION_NAME","PLACEKEY","match_type")]
+poi_sod[, NEW_PLACEKEY := gsub('-.*@', '@', PLACEKEY)]
+
+poi_sod <- poi_sod[!duplicated(poi_sod[,c("NEW_PLACEKEY","UNINUMBR")])]
+poi_sod <- poi_sod[!grepl("Western Union",LOCATION_NAME)]
+poi_sod <- poi_sod[!grepl("Payday",LOCATION_NAME)]
+
+poi_sod[,no_branches:=.N,by=UNINUMBR]
+poi_sod[,atm:=ifelse(grepl(" ATM",LOCATION_NAME),1,0)]
+
+poi_sod <- poi_sod[no_branches==1 | atm==0]
+
+poi_sod[,no_branches:=.N,by=UNINUMBR]
+
+poi_sod <- poi_sod[!(no_branches > 1 & tolower(substr(NAMEFULL, 1, 1)) != tolower(substr(LOCATION_NAME, 1, 1)))]
+poi_sod[,no_branches:=.N,by=UNINUMBR]
+poi_sod[,bank:=ifelse(grepl(" bank",tolower(LOCATION_NAME)),1,0)]
+
+setorder(poi_sod,UNINUMBR,-bank)
+
+poi_sod <- poi_sod[!duplicated(poi_sod$UNINUMBR)]
+
+poi_sod <- poi_sod[,c("UNINUMBR","NEW_PLACEKEY","match_type")]
+
+# poi_sod <- poi_sod[usps_address != ""]
+```
+
+
+```{r}
+sod <- fread(paste0(data_path,"SOD/data/ALL_2022.csv"),select = c("UNINUMBR","CERT","RSSDID","ASSET","DEPSUMBR","STCNTYBR","RSSDHCR","ZIPBR","SIMS_LATITUDE","SIMS_LONGITUDE"))
+sod[,DEPSUMBR:=str_remove_all(DEPSUMBR,",")]
+sod[,DEPSUMBR:=as.numeric(DEPSUMBR)]
+sod[,ASSET:=str_remove_all(ASSET,",")]
+sod[,ASSET:=as.numeric(ASSET)]
+sod[,statefips:=floor(STCNTYBR/1000)]
+sod[,statefips:=str_pad(statefips,2,"left","0")]
+```
+
+```{r}
+#DSS2021 p1136
+hhi <- sod[,.(deposits = sum(DEPSUMBR,na.rm=T)),by=.(RSSDID,STCNTYBR)]
+hhi[,total_deposits:=sum(deposits,na.rm = T),by=.(STCNTYBR)]
+hhi[,deposit_share:=deposits/total_deposits]
+hhi[,deposit_share:=deposit_share*deposit_share]
+hhi <- hhi[,.(deposits_state_hhi=sum(deposit_share)),by=STCNTYBR]
+
+bank_hhi <- sod[,c("RSSDID","STCNTYBR")]
+bank_hhi <- data.table(bank_hhi)
+bank_hhi <- bank_hhi[,.(no_branches=.N),by=.(RSSDID,STCNTYBR)]
+bank_hhi <- bank_hhi[!duplicated(bank_hhi[,c("RSSDID","STCNTYBR")])]
+bank_hhi <- merge(bank_hhi,hhi,by="STCNTYBR")
+bank_hhi[,total_branches:=.N,by=RSSDID]
+bank_hhi[,w_hhi:=no_branches*deposits_state_hhi]
+hhi <- bank_hhi[,.(sum_w_hhi=sum(w_hhi),no_branches=median(total_branches)),by=RSSDID]
+
+hhi[,bank_hhi:=sum_w_hhi/no_branches]
+hhi <- hhi[,c("bank_hhi","RSSDID")]
+```
+
+
+
+```{r}
+sod <- merge(sod,poi_sod,by="UNINUMBR",all.x=T)
+sod[,match:=ifelse(is.na(NEW_PLACEKEY),0,1)]
+
+sod[,bank_size:=ifelse(ASSET<1e6,"1. Less than 1b",ifelse(ASSET<1e7,"2. 1 to 10b",ifelse(ASSET<5e7,"3. 10 to 50b",ifelse(ASSET<25e7,"4. 50 to 250b","5. More than 250b"))))]
+
+setorder(sod,bank_size)
+```
+
+
+
+```{r}
+yrs <- as.character(2020:2021)
+hmda <- list()
+i=1
+for(yr in yrs) {
+  print(yr)
+  hmda_con <- dbConnect(RSQLite::SQLite(), paste0("D:/OneDrive/research-data/HMDA/db/depositor_chars_",yr,"_lar.db"))
+  hmda[[i]] <- data.table(dbGetQuery(hmda_con,
+                                     paste0("select
+                                                activity_year asofdate,
+                                                loan_purpose purposeofloan,
+                                                census_tract censustract
+                                            from tb_",yr,"_lar where 
+                                            occupancy_type=1 and action_taken=1")))
+  i=i+1
+  dbDisconnect(hmda_con)
+}
+hmda <- rbindlist(hmda)
+hmda <- data.table(hmda)
+gc()
+
+hmda[,refinance:=ifelse(purposeofloan==1,0,1)]
+
+hmda_summary <- hmda[,.(no_refinance=sum(refinance),no_loans=.N),by=censustract]
+
+new_hmda_summary = copy(hmda_summary)
+new_hmda_summary[,censustract:=paste0(substr(censustract,1,10),'0')]
+new_hmda_summary <- new_hmda_summary[, lapply(.SD, sum), by = censustract, .SDcols = -"censustract"]
+new_hmda_summary <- new_hmda_summary[!censustract %in% hmda_summary$censustract]
+
+hmda_summary <- rbind(hmda_summary,new_hmda_summary)
+```
+
+
+
+
+
+
+```{r}
+acs_block_data_file <- paste0(data_path,"Dewey/acs_tract_data_2.csv.gz")
+
+asc_block_data <- fread(acs_block_data_file, header = TRUE)
+
+asc_block_data[, `:=`(
+  state = str_pad(state,width = 2,side = "left",pad = "0"),
+  county =str_pad(county,width = 3,side = "left",pad = "0"),
+  tract =str_pad(tract,width = 6,side = "left",pad = "0")
+)]
+
+# Replace negative values with NaN in specific columns
+cols_to_replace <- c(
+  "median_age",
+  "median_income_last_12_months",
+  "aggregate_family_income"
+)
+
+asc_block_data[, (cols_to_replace) := lapply(.SD, function(x) ifelse(x < 0, NA, x)), .SDcols = cols_to_replace]
+
+# Create the 'censustract' column
+asc_block_data[, censustract := paste0(state, county, tract)]
+
+# Calculate additional columns
+asc_block_data[, mean_family_income := aggregate_family_income / no_of_households]
+asc_block_data[, white_fraction := population_race_white / population_race_base]
+asc_block_data[, english_speaking_frac := households_language_english / households_language_base]
+asc_block_data[, spanish_speaking_frac := households_language_spanish / households_language_base]
+asc_block_data[, internet_frac := households_internet_yes / households_internet_base]
+asc_block_data[, computer_frac := households_computer_yes / households_computer_base]
+asc_block_data[, under_19_frac := population_by_age_base_under_19 / population_by_age_base]
+asc_block_data[, over_65_frac := population_by_age_base_65_older / population_by_age_base]
+asc_block_data[, below_poverty_frac := poverty_status_below / poverty_status_base]
+asc_block_data[, food_stamp_frac := received_food_stamps_snap_yes / received_food_stamps_snap_base]
+asc_block_data[, owner_occ_frac := housing_units_occupancy_own / housing_units_occupancy_base]
+asc_block_data[, home_with_mtg_frac := housing_units_with_a_mortgage / housing_units_mortgage_base]
+asc_block_data[, college_or_higher_frac := education_college_or_higher / education_base]
+asc_block_data[, less_than_high_school_frac := education_less_than_high_school / education_base]
+
+# Select desired columns
+selected_columns <- c(
+  'censustract',
+  'median_age',
+  'median_income_last_12_months',
+  'mean_family_income',
+  'white_fraction',
+  'travel_time_to_work',
+  'spanish_speaking_frac',
+  'english_speaking_frac',
+  'internet_frac',
+  'computer_frac',
+  'under_19_frac',
+  'over_65_frac',
+  'below_poverty_frac',
+  'food_stamp_frac',
+  'owner_occ_frac',
+  'college_or_higher_frac',
+  'less_than_high_school_frac'
+)
+
+acs_housing_units <- asc_block_data[,c("housing_units_with_a_mortgage","censustract")]
+acs_housing_units <- acs_housing_units[,.(housing_units_with_a_mortgage=sum(housing_units_with_a_mortgage,na.rm=T)),by=censustract]
+
+new_acs_housing_units <- copy(acs_housing_units)
+new_acs_housing_units[,censustract:=paste0(substr(censustract,1,10),'0')]
+new_acs_housing_units <- new_acs_housing_units[,.(housing_units_with_a_mortgage=sum(housing_units_with_a_mortgage,na.rm=T)),by=censustract]
+new_acs_housing_units <- new_acs_housing_units[!censustract %in% acs_housing_units$censustract]
+acs_housing_units <- rbind(acs_housing_units,new_acs_housing_units)
+
+acs <- asc_block_data[, ..selected_columns]
+
+new_acs = copy(acs)
+new_acs[,censustract:=paste0(substr(censustract,1,10),'0')]
+new_acs <- new_acs[, lapply(.SD, mean), by = censustract, .SDcols = -"censustract"]
+new_acs <- new_acs[!censustract %in% acs$censustract]
+
+acs <- rbind(acs,new_acs)
+acs[, (names(acs)) := lapply(.SD, function(x) replace(x, is.infinite(x), NA)), .SDcols = names(acs)]
+acs <- merge(acs,acs_housing_units,by="censustract")
+
+acs <- merge(acs,hmda_summary,by="censustract",all.x=T)
+acs[,refinance_rate:=no_refinance/housing_units_with_a_mortgage]
+acs[,refinance_rate:=ifelse(is.finite(refinance_rate) & refinance_rate<1,refinance_rate,NA)]
+```
+
+
+
+
+
+```{r}
+# this data is from : https://www.irs.gov/statistics/soi-tax-stats-individual-income-tax-statistics-2019-zip-code-data-soi
+irs <-fread(paste0(data_path,"Dewey/19zpallagi.csv"),select = c("zipcode","N1","N00200","N00600","N00900","N01000"))  #no_returns,no_returns_salaries,no_returns_dividend,no_returns_business,no_returns_captial_gain
+setnames(irs,
+         c("N1","N00200","N00600","N00900","N01000"),
+         c("no_returns","no_returns_salaries","no_returns_dividend","no_returns_business","no_returns_captial_gain"))
+
+irs <- irs[, lapply(.SD, function(x) sum(x, na.rm = TRUE)), by = zipcode]
+
+
+irs[,salary_frac:=no_returns_salaries/no_returns]
+irs[,dividend_frac:=no_returns_dividend/no_returns]
+irs[,business_frac:=no_returns_business/no_returns]
+irs[,capital_gain_frac:=no_returns_captial_gain/no_returns]
+
+tract_zip <- fread(paste0(data_path,"Crosswalk Files/TRACT_ZIP_032016.csv"))
+tract_zip[,TRACT:=as.character(TRACT)]
+tract_zip[,TRACT:=str_pad(TRACT,11,"left","0")]
+setorder(tract_zip,TRACT,-RES_RATIO)
+
+tract_zip <- tract_zip[!duplicated(tract_zip$TRACT)]
+tract_zip <- tract_zip[,c("TRACT","ZIP")]
+
+irs <- merge(irs,tract_zip,by.x="zipcode",by.y="ZIP")
+irs <- irs[,c("TRACT","salary_frac","dividend_frac","business_frac","capital_gain_frac")]
+
+acs <- merge(acs,irs,by.x="censustract",by.y="TRACT",all.x=T)
+```
+
+
+
+
+
+```{r}
+visits_file = paste0(data_path,'Dewey/cbgs_place_month_visits_count20190101_20200301.csv.gz')
+
+visits <- fread(visits_file)
+visits[,censustract:=substr(CBGS,1,11)]
+visits[,CBGS:=NULL]
+visits[, NEW_PLACEKEY := gsub('-[^@]+@', '@', PLACEKEY)]
+
+visits_sum <- visits[,.(no_visits=sum(no_visits,na.rm=T)),by=.(censustract,NEW_PLACEKEY,DATE_RANGE_START)]
+```
+
+```{r}
+visits_merged <- merge(visits_sum,acs,by="censustract")
+```
+
+```{r}
+exclude_cols <- c("NEW_PLACEKEY", "DATE_RANGE_START","no_visits","censustract")
+
+place_visitor_wa <- visits_merged[, lapply(.SD, weighted.mean, w = no_visits, na.rm = TRUE), by = .(NEW_PLACEKEY, DATE_RANGE_START), .SDcols = setdiff(names(visits_merged), exclude_cols)]
+
+place_visitor_wa <- place_visitor_wa[NEW_PLACEKEY %in% sod$NEW_PLACEKEY]
+place_visitor_wa <- merge(place_visitor_wa,sod,by="NEW_PLACEKEY")
+
+```
+
+
+
+```{r}
+gc()
+visits_summary <- fread(paste0(data_path,"Dewey/place_month_visit_summary20190101_20200301.csv.gz"))
+visits_summary[, NEW_PLACEKEY := gsub('-[^@]+@', '@', PLACEKEY)]
+visits_summary <- visits_summary[NEW_PLACEKEY %in% sod$NEW_PLACEKEY]
+
+visits_summary <- visits_summary[,.(RAW_VISIT_COUNTS=sum(RAW_VISIT_COUNTS,na.rm=T),
+                                    RAW_VISITOR_COUNTS = sum(RAW_VISITOR_COUNTS,na.rm=T),
+                                    DISTANCE_FROM_HOME = mean(DISTANCE_FROM_HOME,na.rm=T),
+                                    MEDIAN_DWELL = mean(MEDIAN_DWELL,na.rm=T),
+                                    android = sum(android,na.rm=T),
+                                    ios = sum(ios,na.rm=T)),
+                                 by=.(NEW_PLACEKEY,DATE_RANGE_START)]
+
+
+place_visitor_wa <- merge(place_visitor_wa,visits_summary,by=c("NEW_PLACEKEY","DATE_RANGE_START"))
+
+place_visitor_wa[,android_pct:=android/(ios+android+1)]
+place_visitor_wa[,deposits_per_visitor:=DEPSUMBR/(RAW_VISITOR_COUNTS+1)]
+```
+
+
+
+
+
+```{r}
+gc()
+exclude_cols <- c("NEW_PLACEKEY", "DATE_RANGE_START","censustract","RSSDID","CERT","STCNTYBR","RSSDHCR","ZIPBR","SIMS_LATITUDE","SIMS_LONGITUDE","match_type","match","bank_size","statefips","RAW_VISIT_COUNTS","RAW_VISITOR_COUNTS","android","ios","UNINUMBR")
+
+bank_wa <-  place_visitor_wa[, lapply(.SD, weighted.mean, w = RAW_VISITOR_COUNTS, na.rm = TRUE), by = .(RSSDID, DATE_RANGE_START), .SDcols = setdiff(names(place_visitor_wa), exclude_cols)]
+
+bank_wa[,bank_size:=ifelse(ASSET<1e6,"1. Less than 1b",ifelse(ASSET<1e7,"2. 1 to 10b",ifelse(ASSET<5e7,"3. 10 to 50b",ifelse(ASSET<25e7,"4. 50 to 250b","5. More than 250b"))))]
+
+bank_wa[,bank_size2:=ifelse(ASSET<1e7,"1. Less than 10b","2. More than 10b")]
+```
+
+
+```{r}
+variables <- c( 'median_age',
+  'median_income_last_12_months',
+  'mean_family_income',
+  'white_fraction',
+  'travel_time_to_work',
+  'spanish_speaking_frac',
+  'english_speaking_frac',
+  'internet_frac',
+  'computer_frac',
+  'under_19_frac',
+  'over_65_frac',
+  'below_poverty_frac',
+  'food_stamp_frac',
+  'owner_occ_frac',
+  'college_or_higher_frac',
+  'less_than_high_school_frac',
+  'android_pct',
+  'DISTANCE_FROM_HOME',
+  'MEDIAN_DWELL',
+  'salary_frac',
+  'business_frac',
+  'dividend_frac',
+  'capital_gain_frac',
+  'refinance_rate',
+  'ASSET')
+```
+
+
+
+
+
+```{r include=FALSE,eval=FALSE}
+# Persistance
+
+bank_wa[,DATE_RANGE_START:=as.Date(DATE_RANGE_START)]
+setorder(bank_wa,RSSDID,DATE_RANGE_START)
+
+
+
+for (var in variables) {
+  bank_wa[, paste0(var, "_lagged") := shift(get(var), n = 1, type = "lag"), by = RSSDID]
+  fe_model <- felm(reformulate(paste0(var, "_lagged"), response = var), data = bank_wa)
+  coefficient <- coef(fe_model)[paste0(var, "_lagged")]
+  cat("Coefficient for lagged", var, ":", coefficient, "\n")
+  coefficients <- c(coefficients, coefficient)
+}
+
+```
+
+
+
+
+```{r}
+# depbeta <- fread("DSS_depositBeta.csv")
+# depbeta[,assets_cpi:=str_remove_all(assets_cpi,",")]
+# depbeta[,assets_cpi:=as.numeric(assets_cpi)]
+# depbeta[,beta_z:=(expbeta-mean(depbeta$expbeta))/sd(depbeta$expbeta)]
+
+
+bank_wa_mean_data <- bank_wa[, lapply(.SD, mean, na.rm = TRUE), by = RSSDID, .SDcols = variables]
+bank_wa_mean_data[,bank_size2:=ifelse(ASSET<1e7,"1. Less than 10b","2. More than 10b")]
+bank_wa_mean_data[, paste0(variables, "_quartile") := lapply(.SD, ntile, 4), .SDcols = variables]
+
+bank_wa_mean_data[, paste0(variables, "_quartile2") := lapply(.SD, ntile, 4), .SDcols = variables,by=bank_size2]
+
+
+# bank_wa_mean_data <- merge(bank_wa_mean_data,depbeta,by.x="RSSDID",by.y="rssdid",all.x=T)
+
+sod_summary <- sod[,.(ASSET=mean(ASSET,na.rm=T)),by=RSSDID]
+
+sod_summary[,bank_size:=ifelse(ASSET<1e6,"1. Less than 1b",ifelse(ASSET<1e7,"2. 1 to 10b",ifelse(ASSET<5e7,"3. 10 to 50b",ifelse(ASSET<25e7,"4. 50 to 250b","5. More than 250b"))))]
+
+
+bank_wa_mean_data <- merge(bank_wa_mean_data,sod_summary,by="RSSDID",all.x=T)
+
+# bank_wa_mean_data <- merge(bank_wa_mean_data,hhi,by="RSSDID",all.x=T)
+```
+
+
+
+
+
+
+```{r}
+gc()
+library(DBI)
+library(RSQLite)
+```
+
+
+
+```{r}
+
+con_call <- dbConnect(RSQLite::SQLite(), "D:/OneDrive/research-data/Call Reports/call_reports.db")
+
+con_ubpr <- dbConnect(RSQLite::SQLite(),  "D:/OneDrive/research-data/Call Reports/ubpr.db")
+
+
+data_periods <- apply(expand.grid(c("0331","0630","0930","1231"), 2018:2023), 1, paste, collapse="")
+
+# data_periods <- c(data_periods,"03312023","06302023","09302023","1231") # replace 12312013 with post SVB call reports when available
+
+call <- list()
+
+i=1
+for (dp in data_periods) {
+  ubpr_dp <- as.Date(dp,"%m%d%Y")
+  ubpr_yr <- year(ubpr_dp)
+
+  ubpr_data <- dbGetQuery(con_ubpr,paste0("select
+                                        UBPR2170 assets_total,
+                                        UBPRE878 assets_avg_one_qtr,
+                                        UBPR2122 loans_total,
+                                        UBPR3123 allowance_loan_loss,
+                                        UBPRHR48 interest_on_domestic_deposits,
+                                        UBPRD481 non_int_exp_one_quarter,
+                                        UBPRE037 non_int_exp,
+                                        UBPR2200 deposits,
+                                        UBPRE209 deposit_growth,
+                                        UBPR1754 htm_cost,
+                                        UBPR1771 htm_value,
+                                        UBPR1772 afs_cost,
+                                        UBPR1773 afs_value,
+                                        UBPRE630 roe,
+                                        UBPRD342 roe_denominator_equity,
+                                        UBPRD387 quarterly_net_income,
+                                        UBPR3210 total_equity,
+                                        UBPRE566 htm_assets_ubpr,
+                                        UBPRE091 yeild_on_loans,
+                                        UBPR4074 net_int_income,
+                                        UBPRKX38 net_int_income_qtr,
+                                        UBPR4107 total_int_income,
+                                        UBPRE678 one_qtr_int_income_earn_assets,
+                                        UBPRK434 core_deposits,
+                                        UBPRE088 efficiency_ratio,
+                                        UBPRE089 exp_per_employee,
+                                        UBPRK426+UBPRK437 time_deposits,
+                                        UBPRA549+UBPRA555+UBPRA564+UBPRA570 assets_maturity_less_than_3_months,
+                                        UBPRA550+UBPRA556+UBPRA248+UBPRA565+UBPRA571+UBPRA247 assets_maturity_3_mn_1yr,
+                                        UBPRA551+UBPRA557+UBPRA561+UBPRA566+UBPRA572 assets_maturity_1_to_3_yr,
+                                        UBPRA552+UBPRA558+UBPRA562+UBPRA567+UBPRA573 assets_maturity_3_to_5_yr,
+                                        UBPRA553+UBPRA559+UBPRA568+UBPRA574 assets_maturity_5_to_15_yr,
+                                        UBPRA554+UBPRA560+UBPRA569+UBPRA575 assets_maturity_more_than_15_yr,
+                                        UBPR0081+UBPR0071 cash,
+                                        UBPR4340 net_income,
+                                        IDRSSD
+                                      from ubpr_",ubpr_yr,"
+                                      where
+                                      data_period=",as.numeric(ubpr_dp),""))
+  
+  
+  call_1 <- dbGetQuery(con_call,paste0("select 
+                                      RCON2200 deposits_domestic,
+                                      RCON2385 non_transaction_deposits,
+                                      RCON6631 non_interest_bearing_deposits,
+                                      RCONF049 deposits_domestic_insured,
+                                      RCONF051 deposits_domestic_uninsured,
+                                      RCONF050 deposits_domestic_no_insured,
+                                      RCONF052 deposits_domestic_no_uninsured,
+                                      RCON6631 deposits_domestic_non_interest,
+                                      RCON2210 demand_deposits,
+                                      RCON1797+RCON5367+RCON5368+RCON1460+RCONF158 secured_by_residential_real_estate,
+                                      RCONF160+RCONF161+RCONF159 secured_by_nonresidential_real_estate,
+                                      RCONB538+RCONB539+RCONK137+RCONK207 consumer_loans,
+                                      RCON0010 cash_due_from_depositories,
+                                      RCON0090 balance_due_from_fed,
+                                      IDRSSD 
+                                   from call_1_",dp," "))
+
+  call_2 <- dbGetQuery(con_call,paste0("select 
+                                        RCFN2200 deposits_foreign,
+                                        FDIC_Certificate_Number,
+                                        Financial_Institution_Name,
+                                        Financial_Institution_State,
+                                        data_period,
+                                        RIAD4107 tot_int_income_riad,
+                                        RIAD4508+RIAD0093+RIADHK03+RIADHK04 int_exp_deposits,
+                                        RIAD4093 non_int_exp_call,
+                                        IDRSSD 
+                                     from call_2_",dp," "))
+
+  call_2022 <- merge(call_1,call_2,by="IDRSSD")
+  
+  call_2022 <- merge(call_2022,ubpr_data,by="IDRSSD")
+  
+  call_2022 <- data.table(call_2022)
+  call_2022[,deposits_foreign:=ifelse(is.na(deposits_foreign),0,deposits_foreign)]
+  call_2022[,deposits:=deposits_domestic+deposits_foreign]
+
+  call[[i]] <- call_2022
+
+  i=i+1
+}
+
+call <- rbindlist(call,fill=T)
+
+
+
+call[,year:=as.numeric(substr(data_period,5,8))]
+
+
+call[,wa_maturiy_assets:=(assets_maturity_less_than_3_months*0.25+assets_maturity_3_mn_1yr*0.75+assets_maturity_1_to_3_yr*2+assets_maturity_3_to_5_yr*4+assets_maturity_5_to_15_yr*10+assets_maturity_more_than_15_yr*20)/(cash+assets_maturity_less_than_3_months+assets_maturity_3_mn_1yr+assets_maturity_1_to_3_yr+assets_maturity_3_to_5_yr+assets_maturity_5_to_15_yr+assets_maturity_more_than_15_yr)]
+
+call[,date:=as.Date(data_period,"%m%d%Y")]
+
+dbDisconnect(con_call)
+dbDisconnect(con_ubpr)
+
+# call[,deposits_to_reserves:=deposits/cash]
+# call[,demand_deposits_to_reserves:=demand_deposits/cash]
+# call[,deposits_to_reserves_fed:=deposits/balance_due_from_fed]
+# call[,allowance_loans:=allowance_loan_loss/loans_total]
+# 
+
+setorder(call,IDRSSD,date)
+
+```
+
+
+```{r}
+call[,date_month:=month(date)]
+
+call[,interest_on_domestic_deposits_1:=shift(interest_on_domestic_deposits,1,"lag"),by=IDRSSD]
+call[,interest_on_domestic_deposits:=ifelse(date_month==3,interest_on_domestic_deposits,interest_on_domestic_deposits-interest_on_domestic_deposits_1)]
+call[,interest_on_domestic_deposits:=interest_on_domestic_deposits*4]
+
+
+
+call[,total_int_income:=ifelse(total_int_income==0 | total_int_income<0,NA,total_int_income)]
+call[,total_int_income_1:=shift(total_int_income,1,"lag"),by=IDRSSD]
+call[,total_int_income:=ifelse(date_month==3,total_int_income,total_int_income-total_int_income_1)]
+call[,total_int_income:=total_int_income*4]
+
+call[,net_int_income_1:=shift(net_int_income,1,"lag"),by=IDRSSD]
+call[,net_int_income:=ifelse(date_month==3,net_int_income,net_int_income-net_int_income_1)]
+call[,net_int_income:=net_int_income*4]
+
+call[,net_income_1:=shift(net_income,1,"lag"),by=IDRSSD]
+call[,net_income:=ifelse(date_month==3,net_income,net_income-net_income_1)]
+call[,net_income:=net_income*4]
+
+
+call[,interest_expense:=total_int_income-net_int_income]
+
+call[,interest_expense_to_deposits:=interest_on_domestic_deposits*100/deposits_domestic]
+call[,interest_expense_to_assets:=interest_expense*100/assets_total]
+call[,interest_income_to_assets:=total_int_income*100/assets_total]
+
+
+# call[,nim:=net_int_income*100/assets_total]
+call[,nim:=net_int_income_qtr*400/assets_avg_one_qtr]
+call[,nim:=ifelse(nim>-1 & nim<10,nim,NA)]
+
+call[,roe2:=net_income*100/total_equity]
+call[,equity_assets:=total_equity/assets_total]
+call[,roa:=roe*roe_denominator_equity/assets_avg_one_qtr]
+
+
+call[,deposits_domestic_1:=shift(deposits_domestic,1,"lag"),by=IDRSSD]
+call[,chg_deposits_domestic:=(deposits_domestic-deposits_domestic_1)/deposits_domestic]
+
+call[,core_deposits_1:=shift(core_deposits,1,"lag"),by=IDRSSD]
+call[,chg_core_deposits:=(core_deposits-core_deposits_1)/core_deposits]
+
+call[,interest_expense_to_assets_1:=shift(interest_expense_to_assets,1,"lag"),by=IDRSSD]
+call[,chg_interest_expense_to_assets:=(interest_expense_to_assets-interest_expense_to_assets_1)/interest_expense_to_assets_1]
+
+
+```
+
+
+
+
+
+```{r}
+library(lubridate)
+source('https://raw.githubusercontent.com/dratnadiwakara/r-utilities/main/functions.R')
+```
+
+
+```{r}
+
+call_ts <- copy(call)
+call_ts <- merge(call_ts,bank_wa_mean_data,by.x="IDRSSD",by.y="RSSDID")
+reference_date <- as.Date("2021-12-31")
+
+# Calculate quarters since the reference date
+call_ts[, qtrs_since := {
+  # Calculate year and quarter differences
+  year_diff <- year(date) - year(reference_date)
+  quarter_diff <- quarter(date) - quarter(reference_date)
+  
+  # Total quarters difference
+  year_diff * 4 + quarter_diff
+}]
+
+
+
+call_ts[,sophisticated:=ifelse(college_or_higher_frac_quartile2>=3 & mean_family_income_quartile2>=3 & dividend_frac_quartile2>=3 & refinance_rate_quartile2>=3,1,0)]
+
+call_ts[,season:=paste(sophisticated,month(date))]
+# t <- call_ts[,c("date","qtrs_since")]
+# t <- t[!duplicated(t)]
+# t
+saveRDS(call_ts,paste0(data_path,"Dewey/reg_data/call_ts.rds"))
+```
+
+
+
+
+
+```{r}
+website_visits <- readRDS(paste0(data_path,"Dewey/web_visits_2021.rds"))
+
+physical_visits <- fread(paste0(data_path,"Dewey/place_month_visit_summary20210101_20221201.csv.gz"))
+physical_visits <- physical_visits[year(DATE_RANGE_START)==2021]
+physical_visits[, NEW_PLACEKEY := gsub('-[^@]+@', '@', PLACEKEY)]
+physical_visits <- merge(physical_visits,sod,by="NEW_PLACEKEY")
+physical_visits <- physical_visits[,.(branch_visits=sum(RAW_VISIT_COUNTS)),by=RSSDID]
+
+website_visits <- merge(website_visits,physical_visits,by.x="IDRSSD",by.y="RSSDID")
+website_visits[,web_branch_ratio:=web_visits_2021/branch_visits]
+website_visits[,web_branch_pctile:=ntile(web_branch_ratio,100)]
+website_visits <- website_visits[,c("web_branch_pctile","web_branch_ratio","IDRSSD")]
+
+call <- merge(call,website_visits,by="IDRSSD",all.x=T)
+
+saveRDS(call,"D:/OneDrive/research-data/Dewey/reg_data/call.rds")
+```
+
+
+
+```{r}
+call_st <- call[date=="2021-12-31",
+                c("IDRSSD","deposits_domestic","deposits_domestic_insured","deposits_domestic_uninsured","roa",
+                  "roe","nim","interest_expense_to_deposits","assets_total",
+                  "equity_assets","interest_on_domestic_deposits","yeild_on_loans","core_deposits",
+                  "time_deposits","non_int_exp","efficiency_ratio","interest_expense_to_assets","interest_income_to_assets","roe2","web_branch_pctile","web_branch_ratio")]
+
+call_ed <- call[date=="2023-12-31",
+                c("IDRSSD","deposits_domestic","deposits_domestic_insured","deposits_domestic_uninsured","roa",
+                  "roe","nim","interest_expense_to_deposits","assets_total",
+                  "equity_assets","interest_on_domestic_deposits","yeild_on_loans","core_deposits",
+                  "time_deposits","non_int_exp","efficiency_ratio","interest_expense_to_assets","interest_income_to_assets","roe2")]
+
+call_ed[,interest_expense_to_deposits:=interest_expense_to_deposits] #
+call_ed[,interest_expense_to_assets:=interest_expense_to_assets] #
+call_ed[,interest_income_to_assets:=interest_income_to_assets] #
+call_ed[,non_int_exp:=(non_int_exp*4/3)/assets_total]
+call_st[,non_int_exp:=non_int_exp/assets_total]
+
+exclude_columns <- "IDRSSD"
+setnames(call_ed, setdiff(names(call_ed), exclude_columns), paste0(names(call_ed)[-which(names(call_ed) == exclude_columns)], "_2"))
+
+call_st <- merge(call_st,call_ed,by="IDRSSD")
+
+
+
+call_st[,chg_deposits_domestic:=(deposits_domestic_2-deposits_domestic)/deposits_domestic]
+call_st[,chg_interest_expense_to_deposits:=(interest_expense_to_deposits_2-interest_expense_to_deposits)]
+call_st[,chg_interest_expense_to_assets:=(interest_expense_to_assets_2-interest_expense_to_assets)]
+call_st[,chg_interest_income_to_assets:=(interest_income_to_assets_2-interest_income_to_assets)]
+
+
+call_st[,chg_roa:=(roa_2-roa)/roa]
+call_st[,chg_roa:=ifelse(is.finite(chg_roa),chg_roa,NA)]
+call_st[,chg_roa:=ifelse(abs(chg_roa)<2,chg_roa,NA)]
+
+call_st[,chg_roe:=(roe_2-roe)/roe]
+call_st[,chg_roe:=ifelse(is.finite(chg_roe),chg_roe,NA)]
+call_st[,chg_roe:=ifelse(abs(chg_roe)<2,chg_roe,NA)]
+
+# call_st[,chg_maturity:=(wa_maturiy_assets_2-wa_maturiy_assets)/wa_maturiy_assets]
+call_st[,chg_nim:=(nim_2-nim)/nim]
+call_st[,chg_nim:=ifelse(is.finite(chg_nim) & abs(chg_nim)<2,chg_nim,NA)]
+# call_st[,chg_unr_loss:=(unrealized_loss_equity_2-unrealized_loss_equity)/unrealized_loss_equity]
+# call_st[,chg_yeild_on_loans:=(yeild_on_loans_2-yeild_on_loans)/yeild_on_loans]
+# call_st[,chg_allowance:=(allowance_loans_2-allowance_loans)/allowance_loans]
+call_st[,chg_unins:=(deposits_domestic_uninsured_2-deposits_domestic_uninsured)/deposits_domestic_uninsured]
+call_st[,chg_ins:=(deposits_domestic_insured_2-deposits_domestic_insured)/deposits_domestic_insured]
+call_st[,chg_core_deposits:=(core_deposits_2-core_deposits)/core_deposits]
+call_st[,chg_time_deposits:=(time_deposits_2-time_deposits)/time_deposits]
+call_st[,chg_non_int_exp:=non_int_exp_2-non_int_exp]
+# call_st[,chg_efficiency_ratio:=efficiency_ratio_2-efficiency_ratio]
+
+call_st <- merge(call_st,bank_wa_mean_data,by.x="IDRSSD",by.y="RSSDID")
+call_st <- merge(call_st,hhi,by.x="IDRSSD",by.y="RSSDID",all.x=T)
+
+call_st <- call_st[is.finite(chg_interest_expense_to_deposits) & chg_interest_expense_to_deposits>0 & chg_interest_expense_to_deposits<40 & chg_deposits_domestic<2 & chg_deposits_domestic> -0.5]
+
+call_st[,bank_size_2cat:=ifelse(assets_total<10e6,"small","large")]
+
+call_st[,beta_bin:=ntile(chg_interest_expense_to_deposits,10)]
+call_st[,core_chg_bin:=ntile(chg_core_deposits,10)]
+
+call_st[,mean_family_income_1000:=mean_family_income/1000]
+call_st[,college_or_higher_frac_100:=college_or_higher_frac*100]
+call_st[,white_fraction_100:=white_fraction*100]
+
+call_st[,income_bin:=ntile(mean_family_income,10),by=bank_size_2cat]
+call_st[,education_bin:=ntile(college_or_higher_frac,10),by=bank_size_2cat]
+call_st[,age_bin:=ntile(median_age,10),by=bank_size_2cat]
+call_st[,white_bin:=ntile(white_fraction,10),by=bank_size_2cat]
+call_st[,distance_bin:=ntile(DISTANCE_FROM_HOME,10),by=bank_size_2cat]
+call_st[,dwell_bin:=ntile(MEDIAN_DWELL,10),by=bank_size_2cat]
+call_st[,capgain_bin:=ntile(capital_gain_frac,10),by=bank_size_2cat]
+call_st[,dividend_bin:=ntile(dividend_frac,10),by=bank_size_2cat]
+call_st[,business_bin:=ntile(business_frac,10),by=bank_size_2cat]
+call_st[,refinance_bin:=ntile(refinance_rate,10),by=bank_size_2cat]
+call_st[,refinance_rate_100:=refinance_rate*100]
+call_st[,dividend_frac_100:=dividend_frac*100]
+
+call_st[,chg_core_deposits_100:=chg_core_deposits*100]
+call_st[,chg_unins_100:=chg_unins*100]
+call_st[,chg_ins_100:=chg_ins*100]
+call_st[,chg_time_deposits_100:=chg_time_deposits*100]
+call_st[,exp_beta_our:=chg_interest_expense_to_deposits/5]
+call_st[,web_branch_bin:=ntile(web_branch_pctile,10),by=bank_size_2cat]
+# call_st[,interest_expense_to_assets_100:=interest_expense_to_assets_2*100]
+
+call_st[,sophisticated:=ifelse(college_or_higher_frac_quartile2>=3 & mean_family_income_quartile2>=3 & dividend_frac_quartile2>=3 & refinance_rate_quartile2>=3,1,0)]
+
+call_st[,interest_income_to_assets_100:=interest_income_to_assets]
+call_st[,non_int_exp_100 := non_int_exp*100]
+
+saveRDS(call_st,paste0(data_path,"Dewey/reg_data/call_st.rds"))
+```
+
+
+
+```{r}
+library(DescTools)
+
+round_values <- function(x) {
+  ifelse(x > 100, round(x, 0), ifelse(x > 10, round(x, 1), round(x, 2)))
+}
+
+bank_call_st <-  call[date=="2023-12-31",c("IDRSSD","assets_total","loans_total","core_deposits","time_deposits","deposits_domestic_uninsured","deposits_domestic_insured","nim","roe","deposits_domestic")]
+
+bank_call_st[,deposits_loan:=deposits_domestic*100/loans_total]
+bank_call_st[,loans_total:=loans_total*100/assets_total]
+bank_call_st[,core_deposits:=core_deposits*100/assets_total]
+bank_call_st[,time_deposits:=time_deposits*100/assets_total]
+bank_call_st[,deposits_domestic_uninsured:=deposits_domestic_uninsured*100/assets_total]
+bank_call_st[,deposits_domestic_insured:=deposits_domestic_insured*100/assets_total]
+
+
+bank_wa_mean_data[,college_or_higher_frac_100:=college_or_higher_frac*100]
+bank_wa_mean_data[,white_fraction_100:=white_fraction*100]
+bank_wa_mean_data[,internet_frac_100:=internet_frac*100]
+bank_wa_mean_data[,computer_frac_100:=computer_frac*100]
+bank_wa_mean_data[,owner_occ_frac_100:=owner_occ_frac*100]
+bank_wa_mean_data[,dividend_frac_100:=dividend_frac*100]
+bank_wa_mean_data[,capital_gain_frac_100:=capital_gain_frac*100]
+bank_wa_mean_data[,refinance_rate_100:=refinance_rate*100]
+
+bank_wa_mean_data <- merge(bank_wa_mean_data,bank_call_st,by.x="RSSDID",by.y="IDRSSD",all.x=T)
+
+bank_wa_mean_data <- merge(bank_wa_mean_data,call_st[,c("IDRSSD","interest_expense_to_assets_2","interest_income_to_assets_2","non_int_exp_100")],by.x="RSSDID",by.y="IDRSSD",all.x=T)
+
+
+saveRDS(bank_wa_mean_data,"D:/OneDrive/research-data/Dewey/reg_data/bank_wa_mean_data.rds")
+```
+
+
+```{r}
+
+```
+
