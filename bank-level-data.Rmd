@@ -295,6 +295,7 @@ visits_merged <- merge(visits_sum,acs,by="censustract")
 ```
 
 ```{r}
+gc()
 exclude_cols <- c("NEW_PLACEKEY", "DATE_RANGE_START","no_visits","censustract")
 
 place_visitor_wa <- visits_merged[, lapply(.SD, weighted.mean, w = no_visits, na.rm = TRUE), by = .(NEW_PLACEKEY, DATE_RANGE_START), .SDcols = setdiff(names(visits_merged), exclude_cols)]
@@ -401,7 +402,7 @@ for (var in variables) {
 # depbeta[,assets_cpi:=str_remove_all(assets_cpi,",")]
 # depbeta[,assets_cpi:=as.numeric(assets_cpi)]
 # depbeta[,beta_z:=(expbeta-mean(depbeta$expbeta))/sd(depbeta$expbeta)]
-
+gc()
 
 bank_wa_mean_data <- bank_wa[, lapply(.SD, mean, na.rm = TRUE), by = RSSDID, .SDcols = variables]
 bank_wa_mean_data[,bank_size2:=ifelse(ASSET<1e7,"1. Less than 10b","2. More than 10b")]
@@ -444,7 +445,7 @@ con_ubpr <- dbConnect(RSQLite::SQLite(),  "D:/OneDrive/research-data/Call Report
 
 data_periods <- apply(expand.grid(c("0331","0630","0930","1231"), 2018:2023), 1, paste, collapse="")
 
-# data_periods <- c(data_periods,"03312023","06302023","09302023","1231") # replace 12312013 with post SVB call reports when available
+data_periods <- c(data_periods,"03312016")
 
 call <- list()
 
@@ -520,7 +521,6 @@ for (dp in data_periods) {
                                         Financial_Institution_State,
                                         data_period,
                                         RIAD4107 tot_int_income_riad,
-                                        RIAD4508+RIAD0093+RIADHK03+RIADHK04 int_exp_deposits,
                                         RIAD4093 non_int_exp_call,
                                         IDRSSD 
                                      from call_2_",dp," "))
@@ -781,7 +781,7 @@ round_values <- function(x) {
   ifelse(x > 100, round(x, 0), ifelse(x > 10, round(x, 1), round(x, 2)))
 }
 
-bank_call_st <-  call[date=="2023-12-31",c("IDRSSD","assets_total","loans_total","core_deposits","time_deposits","deposits_domestic_uninsured","deposits_domestic_insured","nim","roe","deposits_domestic")]
+bank_call_st <-  call[date=="2023-12-31",c("IDRSSD","assets_total","loans_total","core_deposits","time_deposits","deposits_domestic_uninsured","deposits_domestic_insured","nim","roe","deposits_domestic","htm_assets_ubpr","htm_cost","htm_value","wa_maturiy_assets")]
 
 bank_call_st[,deposits_loan:=deposits_domestic*100/loans_total]
 bank_call_st[,loans_total:=loans_total*100/assets_total]

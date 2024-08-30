@@ -47,11 +47,30 @@ gc()
 ```
 
 
+
 ```{r}
-branch_df <- readRDS(paste0(data_path,"Dewey/reg_data/branch_df.rds"))
+rate_summary <- readRDS(paste0(data_path,"RateWatch/rate_summary_12MCD10K_2021_2024.rds"))
+
+# Calculate the mean of mean_apy for each UNINUMBR for Q1 2021 and Q4 2023
+result <- rate_summary[, .(
+  mean_apy_q1_2021 = mean(mean_apy[qtr >= "2021-01-01" & qtr <= "2021-03-31"], na.rm = TRUE),
+  mean_apy_q4_2023 = mean(mean_apy[qtr >= "2023-01-01" & qtr <= "2023-12-31"], na.rm = TRUE)
+), by = UNINUMBR]
+result[,change_12M10kCD_rate:=mean_apy_q4_2023-mean_apy_q1_2021]
 ```
 
 
+
+```{r}
+branch_df_2021_2023 <- readRDS(paste0(data_path,"Dewey/reg_data/branch_df_2021_2023.rds"))
+branch_df_2021_2023 <- merge(branch_df_2021_2023,result,by="UNINUMBR",all.x=T)
+
+branch_df_2015_2019 <- readRDS(paste0(data_path,"Dewey/reg_data/branch_df_2015_2019.rds"))
+```
+
+
+
+# Change in Deposits
 
 ```{r}
 plot_loss_deposits <- function(data, x_var, label, color_var,legend.position="none") {
@@ -67,15 +86,50 @@ plot_loss_deposits <- function(data, x_var, label, color_var,legend.position="no
     scale_x_continuous(breaks = seq(min(t[[x_var]]), max(t[[x_var]]), by = 1)) 
 }
 
-plot_loss_deposits(branch_df, "income_decile", "Income decile", "bank_size")
-plot_loss_deposits(branch_df, "education_decile", "Education decile", "bank_size")
-plot_loss_deposits(branch_df, "age_decile", "Age decile", "bank_size")
-plot_loss_deposits(branch_df[!is.na(distance_decile)], "distance_decile", "Distance decile", "bank_size")
-plot_loss_deposits(branch_df[!is.na(dividend_decile)], "dividend_decile", "Dividends decile", "bank_size","bottom")
-plot_loss_deposits(branch_df[!is.na(refinance_decile)], "refinance_decile", "Refinance decile", "bank_size","bottom")
+plot_loss_deposits(branch_df_2021_2023, "income_decile", "Income decile", "bank_size")
+plot_loss_deposits(branch_df_2021_2023, "education_decile", "Education decile", "bank_size")
+plot_loss_deposits(branch_df_2021_2023, "age_decile", "Age decile", "bank_size")
+plot_loss_deposits(branch_df_2021_2023[!is.na(distance_decile)], "distance_decile", "Distance decile", "bank_size")
+plot_loss_deposits(branch_df_2021_2023[!is.na(dividend_decile)], "dividend_decile", "Dividends decile", "bank_size","bottom")
+plot_loss_deposits(branch_df_2021_2023[!is.na(refinance_decile)], "refinance_decile", "Refinance decile", "bank_size","bottom")
+
+```
+# Change in Deposit Rates
+
+```{r}
+plot_loss_deposits <- function(data, x_var, label, color_var,legend.position="none") {
+  t <- data[abs(change_in_deposits)<0.5, .(loss_deposits = mean(change_12M10kCD_rate,na.rm=T)), by = c("bank_size", x_var)]
+  ggplot(t, aes_string(x = x_var, y = "loss_deposits*100", color = color_var)) + 
+    geom_point(size=2)+
+    geom_smooth(method = "lm", formula = y ~ poly(x, 2), se = T)+
+    theme_minimal()+
+    theme(legend.position = legend.position,legend.title = element_blank())+
+    labs(x=label,y="Deposit change (%)")+
+    scale_color_manual(values = c("1. Less than 10b" = "dodgerblue", "2. 10 to 250b" = "firebrick", "3. More than 250b" = "forestgreen"),
+                       labels = c("Less than 10b", "10 to 250b","More than 250b"))+
+    scale_x_continuous(breaks = seq(min(t[[x_var]]), max(t[[x_var]]), by = 1)) 
+}
+
+plot_loss_deposits(branch_df_2021_2023, "income_decile", "Income decile", "bank_size")
+plot_loss_deposits(branch_df_2021_2023, "education_decile", "Education decile", "bank_size")
+plot_loss_deposits(branch_df_2021_2023, "age_decile", "Age decile", "bank_size")
+plot_loss_deposits(branch_df_2021_2023[!is.na(distance_decile)], "distance_decile", "Distance decile", "bank_size")
+plot_loss_deposits(branch_df_2021_2023[!is.na(dividend_decile)], "dividend_decile", "Dividends decile", "bank_size","bottom")
+plot_loss_deposits(branch_df_2021_2023[!is.na(refinance_decile)], "refinance_decile", "Refinance decile", "bank_size","bottom")
 
 ```
 
+# Change in Deposits - 2015 to 2019
+
+```{r}
+
+plot_loss_deposits(branch_df_2015_2019, "income_decile", "Income decile", "bank_size")
+plot_loss_deposits(branch_df_2015_2019, "education_decile", "Education decile", "bank_size")
+plot_loss_deposits(branch_df_2015_2019, "age_decile", "Age decile", "bank_size")
+plot_loss_deposits(branch_df_2015_2019[!is.na(distance_decile)], "distance_decile", "Distance decile", "bank_size")
+plot_loss_deposits(branch_df_2015_2019[!is.na(dividend_decile)], "dividend_decile", "Dividends decile", "bank_size","bottom")
+plot_loss_deposits(branch_df_2015_2019[!is.na(refinance_decile)], "refinance_decile", "Refinance decile", "bank_size","bottom")
+```
 
 
 
@@ -85,13 +139,15 @@ kre_rssd <- c(107244,1068191,1037003,3242838,1099784,1132449,1094640,1074156,273
 ```
 
 
+# Change in Deposits - Regressions
+
 ```{r}
 dep_var = "I(change_in_deposits*100)"
-regsample_small <- branch_df[ ASSET < 1e7  & abs(change_in_deposits)<0.5]
-regsample_med <- branch_df[ASSET > 1e7 & ASSET < 25e7  & abs(change_in_deposits)<0.5]
-regsample_large <- branch_df[ASSET > 25e7  & abs(change_in_deposits)<0.5]
-regsample_kre <- branch_df[(RSSDID %in% kre_rssd | RSSDHCR %in% kre_rssd) & abs(change_in_deposits)<0.5]
-regsample_non_kre <- branch_df[(!RSSDID %in% kre_rssd & !RSSDHCR %in% kre_rssd) & abs(change_in_deposits)<0.5]
+regsample_small <- branch_df_2021_2023[ ASSET < 1e7  & abs(change_in_deposits)<0.5]
+regsample_med <- branch_df_2021_2023[ASSET > 1e7 & ASSET < 25e7  & abs(change_in_deposits)<0.5]
+regsample_large <- branch_df_2021_2023[ASSET > 25e7  & abs(change_in_deposits)<0.5]
+regsample_kre <- branch_df_2021_2023[(RSSDID %in% kre_rssd | RSSDHCR %in% kre_rssd) & abs(change_in_deposits)<0.5]
+regsample_non_kre <- branch_df_2021_2023[(!RSSDID %in% kre_rssd & !RSSDHCR %in% kre_rssd) & abs(change_in_deposits)<0.5]
 
 fe1 <- "RSSDID"
 fe2 <-  "STCNTYBR+RSSDID"
@@ -99,14 +155,14 @@ fe2 <-  "STCNTYBR+RSSDID"
 reg_fe <- function(x_var) {
   r <- list()
 
-  r[[1]] <- felm(as.formula(paste0(dep_var,"~ ",x_var,"  |", fe1, "| 0 |", fe1)), data = regsample_small)
-  r[[2]] <- felm(as.formula(paste0(dep_var,"~ ",x_var,"   |", fe2, "| 0 |", fe2)), data = regsample_small)
-  r[[3]] <- felm(as.formula(paste0(dep_var,"~ ",x_var,"   |", fe1, "| 0 |", fe1)), data = regsample_med)
-  r[[4]] <- felm(as.formula(paste0(dep_var,"~ ",x_var,"   |", fe2, "| 0 |", fe2)), data = regsample_med)
-  r[[5]] <- felm(as.formula(paste0(dep_var,"~ ",x_var,"   |", fe1, "| 0 |", fe1)), data = regsample_large)
-  r[[6]] <- felm(as.formula(paste0(dep_var,"~ ",x_var,"   |", fe2, "| 0 |", fe2)), data = regsample_large)
-  r[[7]] <- felm(as.formula(paste0(dep_var,"~ ",x_var,"   |", fe1, "| 0 |", fe1)), data = regsample_kre)
-  r[[8]] <- felm(as.formula(paste0(dep_var,"~ ",x_var,"   |", fe2, "| 0 |", fe2)), data = regsample_kre)
+  r[[1]] <- felm(as.formula(paste0(dep_var,"~ ",x_var,"  + change_12M10kCD_rate|", fe1, "| 0 |", fe1)), data = regsample_small)
+  r[[2]] <- felm(as.formula(paste0(dep_var,"~ ",x_var,"  + change_12M10kCD_rate |", fe2, "| 0 |", fe2)), data = regsample_small)
+  r[[3]] <- felm(as.formula(paste0(dep_var,"~ ",x_var,"  + change_12M10kCD_rate |", fe1, "| 0 |", fe1)), data = regsample_med)
+  r[[4]] <- felm(as.formula(paste0(dep_var,"~ ",x_var,"  + change_12M10kCD_rate |", fe2, "| 0 |", fe2)), data = regsample_med)
+  r[[5]] <- felm(as.formula(paste0(dep_var,"~ ",x_var,"  + change_12M10kCD_rate |", fe1, "| 0 |", fe1)), data = regsample_large)
+  r[[6]] <- felm(as.formula(paste0(dep_var,"~ ",x_var,"  + change_12M10kCD_rate |", fe2, "| 0 |", fe2)), data = regsample_large)
+  r[[7]] <- felm(as.formula(paste0(dep_var,"~ ",x_var,"  + change_12M10kCD_rate |", fe1, "| 0 |", fe1)), data = regsample_kre)
+  r[[8]] <- felm(as.formula(paste0(dep_var,"~ ",x_var,"  + change_12M10kCD_rate |", fe2, "| 0 |", fe2)), data = regsample_kre)
 #   r[[9]] <- felm(as.formula(paste0(dep_var,"~ ",x_var,"   |", fe1, "| 0 |", fe1)), data = regsample_non_kre)
   # r[[10]] <- felm(as.formula(paste0(dep_var,"~ ",x_var,"   |", fe2, "| 0 |", fe2)), data = regsample_non_kre)
   
@@ -126,8 +182,141 @@ reg_fe("I(refinance_rate*100)")
 
 ```
 
+# Change in Deposits 2015 to 2019 - Regressions
+
+```{r}
+dep_var = "I(change_in_deposits*100)"
+regsample_small <- branch_df_2015_2019[ ASSET < 1e7  & abs(change_in_deposits)<0.5]
+regsample_med <- branch_df_2015_2019[ASSET > 1e7 & ASSET < 25e7  & abs(change_in_deposits)<0.5]
+regsample_large <- branch_df_2015_2019[ASSET > 25e7  & abs(change_in_deposits)<0.5]
+regsample_kre <- branch_df_2015_2019[(RSSDID %in% kre_rssd | RSSDHCR %in% kre_rssd) & abs(change_in_deposits)<0.5]
+regsample_non_kre <- branch_df_2015_2019[(!RSSDID %in% kre_rssd & !RSSDHCR %in% kre_rssd) & abs(change_in_deposits)<0.5]
+
+fe1 <- "RSSDID"
+fe2 <-  "STCNTYBR+RSSDID"
+
+reg_fe("sophisticated")
+```
 
 
+
+```{r}
+bank_wa_mean_data <- readRDS(paste0(data_path,"Dewey/reg_data/bank_wa_mean_data.rds"))
+
+
+call_ts <- readRDS(paste0(data_path,"Dewey/reg_data/call_ts.rds"))
+
+call <- readRDS("D:/OneDrive/research-data/Dewey/reg_data/call.rds")
+
+call_st <- readRDS(paste0(data_path,"Dewey/reg_data/call_st.rds"))
+
+call_st <- merge(call_st,call[date=="2023-12-31",c("IDRSSD","wa_maturiy_assets","htm_assets_ubpr")],by="IDRSSD")
+
+small_low_qt <- call_st[assets_total<10e6 & chg_core_deposits_100< (-7.760)]$IDRSSD
+large_low_qt <- call_st[assets_total>=10e6 & chg_core_deposits_100< (-13.360)]$IDRSSD
+```
+
+
+
+```{r}
+regsample_small <- branch_df_2021_2023[ ASSET < 1e7  & abs(change_in_deposits)<0.5 & RSSDID %in% small_low_qt]
+regsample_small[,change_in_deposits_bin:=ntile(change_in_deposits,10)]
+regsample_large <- branch_df_2021_2023[ASSET > 10e7  & abs(change_in_deposits)<0.5 & RSSDID %in% large_low_qt]
+regsample_large[,change_in_deposits_bin:=ntile(change_in_deposits,10)]
+```
+
+```{r}
+calculate_quantiles <- function(data, var_names) {
+  # Ensure the data is a data.table
+  setDT(data)
+  
+  # Loop through each variable and calculate quantiles
+  results <- lapply(var_names, function(var) {
+    quantiles <- data[, .(
+      p10 = round(quantile(get(var), 0.1, na.rm = TRUE),2),
+      p25 = round(quantile(get(var), 0.25, na.rm = TRUE),2),
+      p50 = round(quantile(get(var), 0.5, na.rm = TRUE),2),
+      p75 = round(quantile(get(var), 0.75, na.rm = TRUE),2),
+      p90 = round(quantile(get(var), 0.9, na.rm = TRUE),2)
+    )]
+    # Add the variable name as a column
+    quantiles[, Variable := var]
+    return(quantiles)
+  })
+  
+  # Combine results for all variables
+  combined_results <- rbindlist(results, use.names = TRUE)
+   setcolorder(combined_results, c("Variable", setdiff(names(combined_results), "Variable")))
+  
+  # Print results
+  return(combined_results)
+}
+```
+
+
+# Small Bank Branches in the Lowest Quartile in Deposit Change
+
+
+```{r}
+t <- regsample_small[,.(
+                      change_in_deposits=round(mean(change_in_deposits,na.rm=T),2)*100,
+                      sophisticated=round(mean(sophisticated,na.rm=T),2)*100,
+                      mean_family_income=round(mean(mean_family_income,na.rm=T)/1000,0),
+                      college_or_higher_frac=round(mean(college_or_higher_frac,na.rm=T),3)*100,
+                      median_age=round(mean(median_age,na.rm=T),2),
+                      dividend_frac=round(mean(dividend_frac,na.rm=T),3)*100
+                  ),
+                by=change_in_deposits_bin]
+
+setorder(t,change_in_deposits_bin)
+t(t)
+```
+
+# Large Bank Branches in the Lowest Quartile in Deposit Change
+
+```{r}
+t <- regsample_large[,.(
+                      change_in_deposits=round(mean(change_in_deposits,na.rm=T),2)*100,
+                      sophisticated=round(mean(sophisticated,na.rm=T),2)*100,
+                      mean_family_income=round(mean(mean_family_income,na.rm=T)/1000,0),
+                      college_or_higher_frac=round(mean(college_or_higher_frac,na.rm=T),3)*100,
+                      median_age=round(mean(median_age,na.rm=T),2),
+                      dividend_frac=round(mean(dividend_frac,na.rm=T),3)*100
+                  ),
+                by=change_in_deposits_bin]
+
+setorder(t,change_in_deposits_bin)
+t(t)
+```
+
+
+
+
+```{r}
+dep_var = "I(change_in_deposits*100)"
+
+fe1 <- "RSSDID"
+fe2 <-  "STCNTYBR+RSSDID"
+
+reg_fe <- function(x_var) {
+  r <- list()
+
+  r[[1]] <- felm(as.formula(paste0(dep_var,"~ ",x_var,"  + change_12M10kCD_rate|", fe1, "| 0 |", fe1)), data = regsample_small)
+  r[[2]] <- felm(as.formula(paste0(dep_var,"~ ",x_var,"  + change_12M10kCD_rate |", fe1, "| 0 |", fe1)), data = regsample_large)
+  #   r[[9]] <- felm(as.formula(paste0(dep_var,"~ ",x_var,"   |", fe1, "| 0 |", fe1)), data = regsample_non_kre)
+  # r[[10]] <- felm(as.formula(paste0(dep_var,"~ ",x_var,"   |", fe2, "| 0 |", fe2)), data = regsample_non_kre)
+  
+  stargazer(r,type="text",no.space = T,align = T,omit.stat=c("ser","f"),style = "qje",omit.table.layout = "n", dep.var.labels.include = FALSE)
+}
+
+reg_fe("sophisticated")
+reg_fe("I(mean_family_income/10000)")
+reg_fe("I(college_or_higher_frac*100)")
+reg_fe("median_age")
+reg_fe("I(DISTANCE_FROM_HOME/1000)")
+reg_fe("I(dividend_frac*100)")
+reg_fe("I(refinance_rate*100)")
+```
 
 
 ```{r}
