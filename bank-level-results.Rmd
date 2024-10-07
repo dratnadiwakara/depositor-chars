@@ -67,6 +67,51 @@ call_st <- merge(call_st,call[date=="2023-12-31",c("IDRSSD","wa_maturiy_assets",
 
 
 ```{r}
+rw <- readRDS(paste0(data_path,"RateWatch/rate_summary_12MCD10K_MM10K_SAV2.5K_2021_2024.rds"))
+
+rw <- rw[,.(cd_rate = mean(mean_apy_CD,na.rm=T),
+            mm_rate = mean(mean_apy_MM,na.rm=T),
+            sav_rate = mean(mean_apy_SAV,na.rm=T)
+            ),
+         by=.(RSSD_ID,qtr)]
+
+rw <- merge(rw,call_st[,c("IDRSSD","sophisticated","median_age",
+                                    "mean_family_income","college_or_higher_frac",
+                                    "dividend_frac","refinance_rate")],
+            by.x="RSSD_ID",by.y="IDRSSD")
+
+reference_date <- as.Date("2021-12-31")
+rw[, qtrs_since := {
+  # Calculate year and quarter differences
+  year_diff <- year(qtr) - year(reference_date)
+  quarter_diff <- quarter(qtr) - quarter(reference_date)
+  
+  # Total quarters difference
+  year_diff * 4 + quarter_diff
+}]
+```
+
+
+```{r}
+r <- list()
+
+r[[1]] <- felm(cd_rate~sophisticated*factor(qtrs_since)|RSSD_ID+qtrs_since|0|RSSD_ID,data=rw)
+r[[2]] <- felm(mm_rate~sophisticated*factor(qtrs_since)|RSSD_ID+qtrs_since|0|RSSD_ID,data=rw)
+r[[3]] <- felm(sav_rate~sophisticated*factor(qtrs_since)|RSSD_ID+qtrs_since|0|RSSD_ID,data=rw)
+
+
+
+
+coef_plot_3reg(r[[1]],"CD",r[[2]],"MM",r[[3]],"SAV","sophisticated:factor(qtrs_since)",-4)+labs(x="Quarters since 2021-Q4")+
+  geom_vline(xintercept = 0.85,size=0.75)+
+  annotate("text",x=1.85,y=0.15,label="Fed started")+
+  annotate("text",x=1.89,y=0.13,label="raising rates")+
+  geom_vline(xintercept = 4.8,size=0.75)+
+  annotate("text",x=5.9,y=0.15,label="SVB collapse")
+```
+
+
+```{r}
 # rate_summary <- readRDS(paste0(data_path,"RateWatch/rate_summary_12MCD10K_2021_2024.rds"))
 # 
 # # Calculate the mean of mean_apy for each UNINUMBR for Q1 2021 and Q4 2023
@@ -279,7 +324,12 @@ r[[1]] <- felm(interest_expense_to_assets~sophisticated*factor(qtrs_since)+log(a
 
 
 
-coef_plot_1reg(r[[1]],"sophisticated:factor(qtrs_since)",-6)+labs(x="Quarters since 2021-Q4")
+coef_plot_1reg(r[[1]],"sophisticated:factor(qtrs_since)",-6)+labs(x="Quarters since 2021-Q4")+
+  geom_vline(xintercept = 0.85,size=0.75)+
+  annotate("text",x=1.8,y=0.3,label="Fed started")+
+  annotate("text",x=1.85,y=0.285,label="raising rates")+
+  geom_vline(xintercept = 4.8,size=0.75)+
+  annotate("text",x=5.9,y=0.3,label="SVB collapse")
 ```
 
 
@@ -290,7 +340,7 @@ r <- list()
 
 # r[[1]] <- felm(chg_core_deposits~sophisticated*factor(qtrs_since)+interest_expense_to_assets_1+log(assets_total)|IDRSSD+qtrs_since|0|IDRSSD,data=call_ts[is.finite(chg_core_deposits) & abs(chg_core_deposits)<0.5])
 # r[[2]] <- felm(chg_deposits_domestic~sophisticated*factor(qtrs_since)+interest_expense_to_assets_1+log(assets_total)|IDRSSD+qtrs_since|0|IDRSSD,data=call_ts[is.finite(chg_deposits_domestic) & abs(chg_deposits_domestic)<0.5])
-r[[1]] <- felm(log(core_deposits)~sophisticated*factor(qtrs_since)+interest_expense_to_assets_1+log(assets_total)|IDRSSD+qtrs_since|0|IDRSSD,data=call_ts[is.finite(chg_deposits_domestic) & abs(chg_deposits_domestic)<0.5 & core_deposits>0 & assets_total<1e7 & qtrs_since>= -6 & qtrs_since<=8])
+r[[1]] <- felm(log(core_deposits)~sophisticated*factor(qtrs_since)+interest_expense_to_assets+log(assets_total)|IDRSSD+qtrs_since|0|IDRSSD,data=call_ts[is.finite(chg_deposits_domestic) & abs(chg_deposits_domestic)<0.5 & core_deposits>0 & assets_total<1e9 & qtrs_since>= -6 & qtrs_since<=8])
 # r[[4]] <- felm(log(core_deposits)~sophisticated*factor(qtrs_since)|IDRSSD+qtrs_since+log(assets_total)|0|IDRSSD,data=call_ts[is.finite(chg_deposits_domestic) & abs(chg_deposits_domestic)<0.5 & core_deposits>0 & assets_total>1e7])
 
 
@@ -299,7 +349,12 @@ r[[1]] <- felm(log(core_deposits)~sophisticated*factor(qtrs_since)+interest_expe
 
 # coef_plot_1reg(r[[1]],"sophisticated:factor(qtrs_since)",-14)
 # coef_plot_1reg(r[[2]],"sophisticated:factor(qtrs_since)",-14)
-coef_plot_1reg(r[[1]],"sophisticated:factor(qtrs_since)",-6)
+coef_plot_1reg(r[[1]],"sophisticated:factor(qtrs_since)",-6)+labs(x="Quarters since 2021-Q4")+
+  geom_vline(xintercept = 0.85,size=0.75)+
+  annotate("text",x=1.8,y=0.03,label="Fed started")+
+  annotate("text",x=1.85,y=0.026,label="raising rates")+
+  geom_vline(xintercept = 4.8,size=0.75)+
+  annotate("text",x=5.9,y=0.03,label="SVB collapse")
 # coef_plot_1reg(r[[4]],"sophisticated:factor(qtrs_since)",-14)
 ```
 # Table 9

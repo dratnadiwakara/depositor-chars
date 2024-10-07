@@ -57,6 +57,7 @@ result <- rate_summary[, .(
   mean_apy_q4_2023 = mean(mean_apy[qtr >= "2023-01-01" & qtr <= "2023-12-31"], na.rm = TRUE)
 ), by = UNINUMBR]
 result[,change_12M10kCD_rate:=mean_apy_q4_2023-mean_apy_q1_2021]
+
 ```
 
 

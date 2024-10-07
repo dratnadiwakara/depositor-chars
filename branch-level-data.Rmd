@@ -728,7 +728,7 @@ for(yr in 2021:2024 ) {
   df[,DATESURVEYED:=as.Date(DATESURVEYED)]
   df[,qtr:=ceiling_date(DATESURVEYED, "quarter") - days(1)]    
   df[,qtr:=as.Date(qtr)]
-  df <- df[PRODUCTDESCRIPTION=="12MCD10K"]
+  df <- df[PRODUCTDESCRIPTION %in% c("12MCD10K","MM10K","SAV2.5K")]
   rate_summary[[i]] <- df[,.(mean_apy=mean(APY,na.rm=T),median_apy=median(APY,na.rm=T)),by=.(qtr,PRD_TYP_JOIN,ACCOUNTNUMBER)]
   i=i+1
   
@@ -748,9 +748,24 @@ rate_summary <- merge(rate_summary,acct_join,by.x=c("ACCOUNTNUMBER","PRD_TYP_JOI
 inst <- fread("C:/Users/dimut/Downloads/Deposit_InstitutionDetails.txt",select = c("ACCT_NBR","CERT_NBR","UNINUMBR","RSSD_ID"))
 
 rate_summary <- merge(rate_summary,inst,by.x="ACCT_NBR_LOC",by.y="ACCT_NBR")
+
+rate_summary <- rate_summary[!is.na(UNINUMBR)]
+
+gc()
 ```
 
 ```{r}
-saveRDS(rate_summary,paste0(data_path,"RateWatch/rate_summary_12MCD10K_2021_2024.rds"))
+rate_summary <- rate_summary %>% select(UNINUMBR,RSSD_ID,PRD_TYP_JOIN,qtr,mean_apy,median_apy) %>% data.table
+
+rate_summary_wide <- dcast(rate_summary,UNINUMBR+RSSD_ID+qtr~PRD_TYP_JOIN,
+                           value.var = c("mean_apy","median_apy"),
+                           fun.aggregate = mean)
+
+```
+
+
+```{r}
+saveRDS(rate_summary_wide,
+        paste0(data_path,"RateWatch/rate_summary_12MCD10K_MM10K_SAV2.5K_2021_2024.rds"))
 ```
 
