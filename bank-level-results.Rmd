@@ -92,6 +92,21 @@ rw[, qtrs_since := {
 ```
 
 
+
+```{r}
+r <- list()
+
+r[[1]] <- felm(cd_rate~sophisticated*I(qtrs_since>0 )|RSSD_ID+qtrs_since|0|RSSD_ID,data=rw)
+r[[2]] <- felm(mm_rate~sophisticated*I(qtrs_since>0)|RSSD_ID+qtrs_since|0|RSSD_ID,data=rw)
+r[[3]] <- felm(sav_rate~sophisticated*I(qtrs_since>0)|RSSD_ID+qtrs_since|0|RSSD_ID,data=rw)
+
+stargazer(r,type="text")
+
+
+```
+
+
+
 ```{r}
 r <- list()
 
@@ -102,7 +117,7 @@ r[[3]] <- felm(sav_rate~sophisticated*factor(qtrs_since)|RSSD_ID+qtrs_since|0|RS
 
 
 
-coef_plot_3reg(r[[1]],"CD",r[[2]],"MM",r[[3]],"SAV","sophisticated:factor(qtrs_since)",-4)+labs(x="Quarters since 2021-Q4")+
+coef_plot_3reg(r[[1]],"CD",r[[2]],"MM",r[[3]],"SAV","sophisticated:factor(qtrs_since)",-4)+labs(x="Quarters since 2021-Q4",y=expression(beta[q]))+
   geom_vline(xintercept = 0.85,size=0.75)+
   annotate("text",x=1.85,y=0.15,label="Fed started")+
   annotate("text",x=1.89,y=0.13,label="raising rates")+
@@ -324,7 +339,8 @@ r[[1]] <- felm(interest_expense_to_assets~sophisticated*factor(qtrs_since)+log(a
 
 
 
-coef_plot_1reg(r[[1]],"sophisticated:factor(qtrs_since)",-6)+labs(x="Quarters since 2021-Q4")+
+coef_plot_1reg(r[[1]],"sophisticated:factor(qtrs_since)",-6)+labs(x="Quarters since 2021-Q4",
+                                                                  y=expression(beta[q]))+
   geom_vline(xintercept = 0.85,size=0.75)+
   annotate("text",x=1.8,y=0.3,label="Fed started")+
   annotate("text",x=1.85,y=0.285,label="raising rates")+
@@ -349,7 +365,7 @@ r[[1]] <- felm(log(core_deposits)~sophisticated*factor(qtrs_since)+interest_expe
 
 # coef_plot_1reg(r[[1]],"sophisticated:factor(qtrs_since)",-14)
 # coef_plot_1reg(r[[2]],"sophisticated:factor(qtrs_since)",-14)
-coef_plot_1reg(r[[1]],"sophisticated:factor(qtrs_since)",-6)+labs(x="Quarters since 2021-Q4")+
+coef_plot_1reg(r[[1]],"sophisticated:factor(qtrs_since)",-6)+labs(x="Quarters since 2021-Q4",y=expression(beta[q]))+
   geom_vline(xintercept = 0.85,size=0.75)+
   annotate("text",x=1.8,y=0.03,label="Fed started")+
   annotate("text",x=1.85,y=0.026,label="raising rates")+

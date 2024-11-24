@@ -1,0 +1,453 @@
+---
+title: "Branch-Level"
+author: "RN DR"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_collapsed: true
+    theme: united
+    number_sections: true
+    code_folding: hide
+---
+
+```{=html}
+<style type="text/css">
+.main-container {
+  max-width: 100%;
+  margin-left: auto;
+  margin-right: auto;
+}
+
+div.main-container {
+  max-width: 100%;
+}
+</style>
+```
+
+
+```{r include=FALSE}
+rm(list=ls())
+library(data.table)
+library(lfe)
+library(stargazer)
+library(ggplot2)
+library(stringr)
+library(stringi)
+library(readxl)
+library(DBI)
+library(RSQLite)
+library(dplyr)
+
+source('https://raw.githubusercontent.com/dratnadiwakara/r-utilities/main/functions.R')
+# library(quantmod)
+data_path = 'D:/OneDrive/research-data/'
+gc()
+```
+
+
+
+
+```{r}
+poi_sod <- fread(paste0(data_path,"Dewey/poi_sod_4.csv.gz"))
+poi_sod <- poi_sod[,c("CERT","UNINUMBR","NAMEFULL","usps_address","full_address_sod","LOCATION_NAME","PLACEKEY","match_type")]
+poi_sod[, NEW_PLACEKEY := gsub('-.*@', '@', PLACEKEY)]
+
+poi_sod <- poi_sod[!duplicated(poi_sod[,c("NEW_PLACEKEY","UNINUMBR")])]
+poi_sod <- poi_sod[!grepl("Western Union",LOCATION_NAME)]
+poi_sod <- poi_sod[!grepl("Payday",LOCATION_NAME)]
+
+poi_sod[,no_branches:=.N,by=UNINUMBR]
+poi_sod[,atm:=ifelse(grepl(" ATM",LOCATION_NAME),1,0)]
+
+poi_sod <- poi_sod[no_branches==1 | atm==0]
+
+poi_sod[,no_branches:=.N,by=UNINUMBR]
+
+poi_sod <- poi_sod[!(no_branches > 1 & tolower(substr(NAMEFULL, 1, 1)) != tolower(substr(LOCATION_NAME, 1, 1)))]
+poi_sod[,no_branches:=.N,by=UNINUMBR]
+poi_sod[,bank:=ifelse(grepl(" bank",tolower(LOCATION_NAME)),1,0)]
+
+setorder(poi_sod,UNINUMBR,-bank)
+
+poi_sod <- poi_sod[!duplicated(poi_sod$UNINUMBR)]
+
+poi_sod <- poi_sod[,c("UNINUMBR","NEW_PLACEKEY","match_type")]
+
+# poi_sod <- poi_sod[usps_address != ""]
+```
+
+
+
+```{r}
+sod <- fread(paste0(data_path,"SOD/data/ALL_2022.csv"),select = c("UNINUMBR","CERT","RSSDID","ASSET","DEPSUMBR","STCNTYBR","RSSDHCR","ZIPBR","SIMS_LATITUDE","SIMS_LONGITUDE"))
+sod[,DEPSUMBR:=str_remove_all(DEPSUMBR,",")]
+sod[,DEPSUMBR:=as.numeric(DEPSUMBR)]
+sod[,ASSET:=str_remove_all(ASSET,",")]
+sod[,ASSET:=as.numeric(ASSET)]
+sod[,statefips:=floor(STCNTYBR/1000)]
+sod[,statefips:=str_pad(statefips,2,"left","0")]
+```
+
+
+```{r}
+sod <- merge(sod,poi_sod,by="UNINUMBR",all.x=T)
+sod[,match:=ifelse(is.na(NEW_PLACEKEY),0,1)]
+
+sod[,bank_size:=ifelse(ASSET<1e6,"1. Less than 1b",ifelse(ASSET<1e7,"2. 1 to 10b",ifelse(ASSET<5e7,"3. 10 to 50b",ifelse(ASSET<25e7,"4. 50 to 250b","5. More than 250b"))))]
+
+setorder(sod,bank_size)
+```
+
+```{r}
+visits_summary <- fread(paste0(data_path,"Dewey/place_month_visit_summary20190101_20200301.csv.gz"))
+visits_summary[, NEW_PLACEKEY := gsub('-[^@]+@', '@', PLACEKEY)]
+visits_summary <- visits_summary[NEW_PLACEKEY %in% sod$NEW_PLACEKEY]
+
+visits_summary <- visits_summary[,.(RAW_VISIT_COUNTS=sum(RAW_VISIT_COUNTS,na.rm=T),
+                                    RAW_VISITOR_COUNTS = sum(RAW_VISITOR_COUNTS,na.rm=T),
+                                    DISTANCE_FROM_HOME = mean(DISTANCE_FROM_HOME,na.rm=T),
+                                    MEDIAN_DWELL = mean(MEDIAN_DWELL,na.rm=T),
+                                    android = sum(android,na.rm=T),
+                                    ios = sum(ios,na.rm=T)),
+                                 by=.(NEW_PLACEKEY,DATE_RANGE_START)]
+
+visits_summary <- merge(visits_summary,sod[,c("UNINUMBR","NEW_PLACEKEY")],by="NEW_PLACEKEY")
+```
+
+```{r}
+saveRDS(visits_summary,paste0(data_path,"Dewey/bank_branch_visits_count.rds"))
+```
+
+
+```{r}
+visits_file = paste0(data_path,'Dewey/cbgs_place_month_visits_count20190101_20200301.csv.gz')
+
+visits <- fread(visits_file)
+visits[,censustract:=substr(CBGS,1,11)]
+visits[,CBGS:=NULL]
+visits[, NEW_PLACEKEY := gsub('-[^@]+@', '@', PLACEKEY)]
+
+visits_sum <- visits[,.(no_visits=sum(no_visits,na.rm=T)),by=.(censustract,NEW_PLACEKEY,DATE_RANGE_START)]
+
+visits_sum <- visits_sum[NEW_PLACEKEY %in% sod$NEW_PLACEKEY]
+```
+
+```{r}
+exclude_cols <- c("NEW_PLACEKEY", "DATE_RANGE_START","no_visits","censustract")
+
+place_visitor_wa <- visits_merged[, lapply(.SD, weighted.mean, w = no_visits, na.rm = TRUE), by = .(NEW_PLACEKEY, DATE_RANGE_START), .SDcols = setdiff(names(visits_merged), exclude_cols)]
+
+place_visitor_wa <- place_visitor_wa[NEW_PLACEKEY %in% sod$NEW_PLACEKEY]
+place_visitor_wa <- merge(place_visitor_wa,sod,by="NEW_PLACEKEY")
+
+```
+
+
+```{r}
+
+
+
+place_visitor_wa <- merge(place_visitor_wa,visits_summary,by=c("NEW_PLACEKEY","DATE_RANGE_START"))
+
+place_visitor_wa[,android_pct:=android/(ios+android+1)]
+place_visitor_wa[,deposits_per_visitor:=DEPSUMBR/(RAW_VISITOR_COUNTS+1)]
+```
+
+
+```{r}
+website_visits <- readRDS(paste0(data_path,"Dewey/web_visits_2021.rds"))
+
+physical_visits <- fread(paste0(data_path,"Dewey/place_month_visit_summary20210101_20221201.csv.gz"))
+physical_visits <- physical_visits[year(DATE_RANGE_START)==2021]
+physical_visits[, NEW_PLACEKEY := gsub('-[^@]+@', '@', PLACEKEY)]
+physical_visits <- merge(physical_visits,sod,by="NEW_PLACEKEY")
+physical_visits <- physical_visits[,.(branch_visits=sum(RAW_VISIT_COUNTS)),by=RSSDID]
+
+website_visits <- merge(website_visits,physical_visits,by.x="IDRSSD",by.y="RSSDID")
+website_visits[,web_branch_ratio:=web_visits_2021/branch_visits]
+website_visits[,web_branch_pctile:=ntile(web_branch_ratio,100)]
+website_visits <- website_visits[,c("web_branch_pctile","IDRSSD")]
+```
+
+```{r}
+place_visitor_wa <- merge(place_visitor_wa,website_visits,by.x="RSSDID",by.y="IDRSSD",all.x=T)
+```
+
+```{r}
+variables <- c( 'median_age',
+  'median_income_last_12_months',
+  'mean_family_income',
+  'white_fraction',
+  'travel_time_to_work',
+  'spanish_speaking_frac',
+  'english_speaking_frac',
+  'internet_frac',
+  'computer_frac',
+  'under_19_frac',
+  'over_65_frac',
+  'below_poverty_frac',
+  'food_stamp_frac',
+  'owner_occ_frac',
+  'college_or_higher_frac',
+  'less_than_high_school_frac',
+  'DISTANCE_FROM_HOME',
+  'MEDIAN_DWELL',
+  'salary_frac',
+  'business_frac',
+  'dividend_frac',
+  'capital_gain_frac',
+  'refinance_rate',
+  'web_branch_pctile',
+  'ASSET')
+```
+
+
+```{r}
+branch_2019 <- place_visitor_wa[, lapply(.SD, mean, na.rm = TRUE), by = UNINUMBR, .SDcols = variables]
+```
+
+
+```{r}
+retail_acs <- merge(branch_2019[,c("UNINUMBR","college_or_higher_frac","mean_family_income","median_age")],
+                    retail_visits_branch_df[,c("UNINUMBR","retail_income","retail_education","retail_age")],
+                    by="UNINUMBR")
+```
+
+```{r}
+generate_lm_plot <- function(data, x_var, y_var, xlab, ylab) {
+  cor_value <- cor(data[[x_var]], data[[y_var]], use = "complete.obs")
+  
+  g <- ggplot(data, aes_string(x = x_var, y = y_var)) +
+    geom_point() +
+    geom_smooth(method = "lm") +
+    labs(x = xlab, y = ylab) +
+    theme_minimal() +
+    theme(legend.position = "bottom", legend.title = element_blank()) +
+    annotate("text", x = min(data[[x_var]]), y = max(data[[y_var]]), label = paste("Correlation :", round(cor_value, 3)), hjust = 0, vjust = 1, size = 4)
+
+  print(g)
+  
+}
+
+generate_lm_plot(retail_acs, "retail_income", "mean_family_income", "Income (retail visits)", "Income (census tract)")
+generate_lm_plot(retail_acs, "retail_education", "college_or_higher_frac", "College (retail visits)", "College (census tract)")
+# generate_lm_plot(retail_acs, "retail_age", "median_age", "Income (retail)", "Income (census tract)")
+```
+
+```{r}
+sod_2021 <- fread(paste0(data_path,"SOD/data/ALL_2015.csv"),select = c("YEAR","RSSDID","RSSDHCR"))
+```
+
+```{r}
+yrs <- 2000:2022
+sod <- list()
+i=1
+
+for(yr in yrs) {
+  temp <- fread(paste0(data_path,paste0("SOD/data/ALL_",yr,".csv")),select = c("YEAR","RSSDID","RSSDHCR"))
+  temp <- temp[!duplicated(temp)]
+  sod[[i]] <- temp
+  i=i+1
+}
+
+sod <- rbindlist(sod)
+saveRDS(sod,"C:/Users/dimut/Downloads/rssd_rssdhcr_sod.rds")
+```
+
+
+# 2015 to 2019
+
+```{r}
+sod_2021 <- fread(paste0(data_path,"SOD/data/ALL_2015.csv"),select = c("UNINUMBR","CERT","RSSDID","ASSET","DEPSUM","DEPSUMBR","STCNTYBR","RSSDHCR","ZIPBR","SIMS_LATITUDE","SIMS_LONGITUDE","STCNTY"))
+sod_2021[,DEPSUMBR:=str_remove_all(DEPSUMBR,",")]
+sod_2021[,DEPSUMBR:=as.numeric(DEPSUMBR)]
+sod_2021[,DEPSUM:=str_remove_all(DEPSUM,",")]
+sod_2021[,DEPSUM:=as.numeric(DEPSUM)]
+
+sod_2021[,ASSET:=str_remove_all(ASSET,",")]
+sod_2021[,ASSET:=as.numeric(ASSET)]
+sod_2021[,statefips:=floor(STCNTYBR/1000)]
+sod_2021[,statefips:=str_pad(statefips,2,"left","0")]
+
+
+sod_2022 <- fread(paste0(data_path,"SOD/data/ALL_2019.csv"),select = c("UNINUMBR","DEPSUMBR"))
+sod_2022[,DEPSUMBR:=str_remove_all(DEPSUMBR,",")]
+sod_2022[,DEPSUMBR:=as.numeric(DEPSUMBR)]
+setnames(sod_2022,"DEPSUMBR","DEPSUMBR2")
+
+sod <- merge(sod_2021,sod_2022,by="UNINUMBR")
+sod[,change_in_deposits:= (DEPSUMBR2-DEPSUMBR)/DEPSUMBR]
+sod[,deposit_share:=DEPSUMBR/DEPSUM]
+sod <- sod[is.finite(change_in_deposits) ]#& deposit_share> quantile(sod$deposit_share,0.025,na.rm = T)]
+sod <- sod[change_in_deposits > quantile(sod$change_in_deposits,0.01,na.rm=T) & change_in_deposits < quantile(sod$change_in_deposits,0.99,na.rm = T) ]
+
+sod[,bank_size:=ifelse(ASSET<1e7,"1. Less than 10b",ifelse(ASSET<25e7,"2. 10 to 250b","3. More than 250b"))]
+```
+
+
+
+
+```{r}
+
+branch_df <- place_visitor_wa[, lapply(.SD, mean, na.rm = TRUE), by = UNINUMBR, .SDcols = variables]
+branch_df <- merge(branch_df,sod,by="UNINUMBR")
+branch_df[,loss_deposits:=ifelse(change_in_deposits< 0,1,0)]
+
+branch_df[,income_decile:=ntile(mean_family_income,10)]
+branch_df[,education_decile:=ntile(college_or_higher_frac,10)]
+branch_df[,age_decile:=ntile(median_age,10)]
+branch_df[,white_decile:=ntile(white_fraction,10)]
+branch_df[,dividend_decile:=ntile(dividend_frac,10)]
+branch_df[,refinance_decile:=ntile(refinance_rate,10)]
+branch_df[,distance_decile:=ntile(DISTANCE_FROM_HOME,10)]
+
+branch_df[,bank_size2:=ifelse(bank_size=="1. Less than 10b","small","large")]
+
+branch_df[,income_qt:=ntile(mean_family_income,4),by=bank_size2]
+branch_df[,education_qt:=ntile(college_or_higher_frac,4),by=bank_size2]
+branch_df[,age_qt:=ntile(median_age,4),by=bank_size2]
+branch_df[,dividend_qt:=ntile(dividend_frac,4),by=bank_size2]
+branch_df[,refinance_qt:=ntile(refinance_rate,4),by=bank_size2]
+branch_df[,distance_qt:=ntile(DISTANCE_FROM_HOME,4),by=bank_size2]
+
+
+
+branch_df[,ASSET:=ASSET.x]
+
+branch_df[,sophisticated:=ifelse(education_qt>=3 & income_qt>=3 & dividend_qt>=3 & refinance_qt>=3,1,0)]
+
+saveRDS(branch_df,paste0(data_path,"Dewey/reg_data/branch_df_2015_2019.rds"))
+```
+
+
+
+# 2021 to 2023
+
+```{r}
+sod_2021 <- fread(paste0(data_path,"SOD/data/ALL_2021.csv"),select = c("UNINUMBR","CERT","RSSDID","ASSET","DEPSUM","DEPSUMBR","STCNTYBR","RSSDHCR","ZIPBR","SIMS_LATITUDE","SIMS_LONGITUDE","STCNTY"))
+sod_2021[,DEPSUMBR:=str_remove_all(DEPSUMBR,",")]
+sod_2021[,DEPSUMBR:=as.numeric(DEPSUMBR)]
+sod_2021[,DEPSUM:=str_remove_all(DEPSUM,",")]
+sod_2021[,DEPSUM:=as.numeric(DEPSUM)]
+
+sod_2021[,ASSET:=str_remove_all(ASSET,",")]
+sod_2021[,ASSET:=as.numeric(ASSET)]
+sod_2021[,statefips:=floor(STCNTYBR/1000)]
+sod_2021[,statefips:=str_pad(statefips,2,"left","0")]
+
+
+sod_2022 <- fread(paste0(data_path,"SOD/data/ALL_2023.csv"),select = c("UNINUMBR","DEPSUMBR"))
+sod_2022[,DEPSUMBR:=str_remove_all(DEPSUMBR,",")]
+sod_2022[,DEPSUMBR:=as.numeric(DEPSUMBR)]
+setnames(sod_2022,"DEPSUMBR","DEPSUMBR2")
+
+sod <- merge(sod_2021,sod_2022,by="UNINUMBR")
+sod[,change_in_deposits:= (DEPSUMBR2-DEPSUMBR)/DEPSUMBR]
+sod[,deposit_share:=DEPSUMBR/DEPSUM]
+sod <- sod[is.finite(change_in_deposits) ]#& deposit_share> quantile(sod$deposit_share,0.025,na.rm = T)]
+sod <- sod[change_in_deposits > quantile(sod$change_in_deposits,0.01,na.rm=T) & change_in_deposits < quantile(sod$change_in_deposits,0.99,na.rm = T) ]
+
+sod[,bank_size:=ifelse(ASSET<1e7,"1. Less than 10b",ifelse(ASSET<25e7,"2. 10 to 250b","3. More than 250b"))]
+```
+
+
+
+
+```{r}
+
+branch_df <- place_visitor_wa[, lapply(.SD, mean, na.rm = TRUE), by = UNINUMBR, .SDcols = variables]
+branch_df <- merge(branch_df,sod,by="UNINUMBR")
+branch_df[,loss_deposits:=ifelse(change_in_deposits< 0,1,0)]
+
+branch_df[,income_decile:=ntile(mean_family_income,10)]
+branch_df[,education_decile:=ntile(college_or_higher_frac,10)]
+branch_df[,age_decile:=ntile(median_age,10)]
+branch_df[,white_decile:=ntile(white_fraction,10)]
+branch_df[,dividend_decile:=ntile(dividend_frac,10)]
+branch_df[,refinance_decile:=ntile(refinance_rate,10)]
+branch_df[,distance_decile:=ntile(DISTANCE_FROM_HOME,10)]
+
+branch_df[,bank_size2:=ifelse(bank_size=="1. Less than 10b","small","large")]
+
+branch_df[,income_qt:=ntile(mean_family_income,4),by=bank_size2]
+branch_df[,education_qt:=ntile(college_or_higher_frac,4),by=bank_size2]
+branch_df[,age_qt:=ntile(median_age,4),by=bank_size2]
+branch_df[,dividend_qt:=ntile(dividend_frac,4),by=bank_size2]
+branch_df[,refinance_qt:=ntile(refinance_rate,4),by=bank_size2]
+branch_df[,distance_qt:=ntile(DISTANCE_FROM_HOME,4),by=bank_size2]
+
+
+
+branch_df[,ASSET:=ASSET.x]
+
+branch_df[,sophisticated:=ifelse(education_qt>=3 & income_qt>=3 & dividend_qt>=3 & refinance_qt>=3,1,0)]
+
+saveRDS(branch_df,paste0(data_path,"Dewey/reg_data/branch_df_2021_2023.rds"))
+```
+
+
+
+
+
+# RateWatch Data
+From: https://lsumail2-my.sharepoint.com/personal/rnarayan_lsu_edu/_layouts/15/onedrive.aspx?e=5%3A79ae71a0621e4c61bb5fa258ae118d1a&sharingv2=true&fromShare=true&at=9&CT=1723993488640&OR=OWA%2DNT%2DMail&CID=9e9eb62e%2D7d89%2Da6f4%2D513b%2D496f6d14ae36&cidOR=Client&id=%2Fpersonal%2Frnarayan%5Flsu%5Fedu%2FDocuments%2FData%2FRatewatch2024&FolderCTID=0x01200054D966B16334BB4CBD90E81846B012E5&view=0
+
+
+```{r}
+library(data.table)
+library(lubridate)
+
+
+folder <- "C:/Users/dimut/Downloads/"
+
+rate_summary <- list()
+i=1
+for(yr in 2021:2024 ) {
+  print(yr)
+  df <- fread(paste0(folder,"DepositRateData",yr,".txt"))
+  df[,DATESURVEYED:=as.Date(DATESURVEYED)]
+  df[,qtr:=ceiling_date(DATESURVEYED, "quarter") - days(1)]    
+  df[,qtr:=as.Date(qtr)]
+  df <- df[PRODUCTDESCRIPTION %in% c("12MCD10K","MM10K","SAV2.5K")]
+  rate_summary[[i]] <- df[,.(mean_apy=mean(APY,na.rm=T),median_apy=median(APY,na.rm=T)),by=.(qtr,PRD_TYP_JOIN,ACCOUNTNUMBER)]
+  i=i+1
+  
+  rm(df)
+  gc()
+}
+
+
+rate_summary <- rbindlist(rate_summary)
+```
+
+```{r}
+acct_join <- fread("C:/Users/dimut/Downloads/Deposit_acct_join.txt")
+
+rate_summary <- merge(rate_summary,acct_join,by.x=c("ACCOUNTNUMBER","PRD_TYP_JOIN"),by.y=c("ACCT_NBR_RT","PRD_TYP_JOIN"))
+
+inst <- fread("C:/Users/dimut/Downloads/Deposit_InstitutionDetails.txt",select = c("ACCT_NBR","CERT_NBR","UNINUMBR","RSSD_ID"))
+
+rate_summary <- merge(rate_summary,inst,by.x="ACCT_NBR_LOC",by.y="ACCT_NBR")
+
+rate_summary <- rate_summary[!is.na(UNINUMBR)]
+
+gc()
+```
+
+```{r}
+rate_summary <- rate_summary %>% select(UNINUMBR,RSSD_ID,PRD_TYP_JOIN,qtr,mean_apy,median_apy) %>% data.table
+
+rate_summary_wide <- dcast(rate_summary,UNINUMBR+RSSD_ID+qtr~PRD_TYP_JOIN,
+                           value.var = c("mean_apy","median_apy"),
+                           fun.aggregate = mean)
+
+```
+
+
+```{r}
+saveRDS(rate_summary_wide,
+        paste0(data_path,"RateWatch/rate_summary_12MCD10K_MM10K_SAV2.5K_2021_2024.rds"))
+```
+

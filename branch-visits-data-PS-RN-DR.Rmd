@@ -1,0 +1,128 @@
+---
+title: "Monthly Branch Visits Data"
+author: ""
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_collapsed: true
+    theme: united
+    number_sections: true
+    code_folding: hide
+---
+
+```{=html}
+<style type="text/css">
+.main-container {
+  max-width: 100%;
+  margin-left: auto;
+  margin-right: auto;
+}
+
+div.main-container {
+  max-width: 100%;
+}
+</style>
+```
+
+
+```{r include=FALSE}
+rm(list=ls())
+library(data.table)
+library(lfe)
+library(stargazer)
+library(ggplot2)
+library(stringr)
+library(stringi)
+library(readxl)
+library(DBI)
+library(RSQLite)
+library(dplyr)
+
+source('https://raw.githubusercontent.com/dratnadiwakara/r-utilities/main/functions.R')
+# library(quantmod)
+data_path = 'D:/OneDrive/research-data/'
+gc()
+```
+
+
+
+
+```{r}
+poi_sod <- fread(paste0(data_path,"Dewey/poi_sod_4.csv.gz"))
+poi_sod <- poi_sod[,c("CERT","UNINUMBR","NAMEFULL","usps_address","full_address_sod","LOCATION_NAME","PLACEKEY","match_type")]
+poi_sod[, NEW_PLACEKEY := gsub('-.*@', '@', PLACEKEY)]
+
+poi_sod <- poi_sod[!duplicated(poi_sod[,c("NEW_PLACEKEY","UNINUMBR")])]
+poi_sod <- poi_sod[!grepl("Western Union",LOCATION_NAME)]
+poi_sod <- poi_sod[!grepl("Payday",LOCATION_NAME)]
+
+poi_sod[,no_branches:=.N,by=UNINUMBR]
+poi_sod[,atm:=ifelse(grepl(" ATM",LOCATION_NAME),1,0)]
+
+poi_sod <- poi_sod[no_branches==1 | atm==0]
+
+poi_sod[,no_branches:=.N,by=UNINUMBR]
+
+poi_sod <- poi_sod[!(no_branches > 1 & tolower(substr(NAMEFULL, 1, 1)) != tolower(substr(LOCATION_NAME, 1, 1)))]
+poi_sod[,no_branches:=.N,by=UNINUMBR]
+poi_sod[,bank:=ifelse(grepl(" bank",tolower(LOCATION_NAME)),1,0)]
+
+setorder(poi_sod,UNINUMBR,-bank)
+
+poi_sod <- poi_sod[!duplicated(poi_sod$UNINUMBR)]
+
+poi_sod <- poi_sod[,c("UNINUMBR","NEW_PLACEKEY","match_type")]
+
+# poi_sod <- poi_sod[usps_address != ""]
+```
+
+
+
+```{r}
+sod <- fread(paste0(data_path,"SOD/data/ALL_2021.csv"),select = c("UNINUMBR","CERT","RSSDID","ASSET","DEPSUMBR","STCNTYBR","RSSDHCR","ZIPBR","SIMS_LATITUDE","SIMS_LONGITUDE"))
+sod[,DEPSUMBR:=str_remove_all(DEPSUMBR,",")]
+sod[,DEPSUMBR:=as.numeric(DEPSUMBR)]
+sod[,ASSET:=str_remove_all(ASSET,",")]
+sod[,ASSET:=as.numeric(ASSET)]
+sod[,statefips:=floor(STCNTYBR/1000)]
+sod[,statefips:=str_pad(statefips,2,"left","0")]
+```
+
+
+```{r}
+sod <- merge(sod,poi_sod,by="UNINUMBR",all.x=T)
+sod[,match:=ifelse(is.na(NEW_PLACEKEY),0,1)]
+
+sod[,bank_size:=ifelse(ASSET<1e6,"1. Less than 1b",ifelse(ASSET<1e7,"2. 1 to 10b",ifelse(ASSET<5e7,"3. 10 to 50b",ifelse(ASSET<25e7,"4. 50 to 250b","5. More than 250b"))))]
+
+setorder(sod,bank_size)
+```
+
+```{r}
+
+visits_files <- paste0(data_path,"Dewey/",c("place_month_visit_summary20190101_20200301.csv.gz","place_month_visit_summary20210101_20221201.csv.gz"))
+
+visits_summary <- rbindlist(lapply(visits_files, fread))
+
+visits_summary[, NEW_PLACEKEY := gsub('-[^@]+@', '@', PLACEKEY)]
+visits_summary <- visits_summary[NEW_PLACEKEY %in% sod$NEW_PLACEKEY]
+
+visits_summary <- visits_summary[,.(RAW_VISIT_COUNTS=sum(RAW_VISIT_COUNTS,na.rm=T),
+                                    RAW_VISITOR_COUNTS = sum(RAW_VISITOR_COUNTS,na.rm=T),
+                                    DISTANCE_FROM_HOME = mean(DISTANCE_FROM_HOME,na.rm=T),
+                                    MEDIAN_DWELL = mean(MEDIAN_DWELL,na.rm=T),
+                                    android = sum(android,na.rm=T),
+                                    ios = sum(ios,na.rm=T)),
+                                 by=.(NEW_PLACEKEY,DATE_RANGE_START)]
+
+visits_summary <- merge(visits_summary,sod[,c("UNINUMBR","NEW_PLACEKEY")],by="NEW_PLACEKEY")
+visits_summary[,DATE_RANGE_START:=as.Date(DATE_RANGE_START)]
+```
+
+```{r}
+saveRDS(visits_summary,paste0(data_path,"Dewey/bank_branch_visits_count_2019_2022.rds"))
+```
+
+
