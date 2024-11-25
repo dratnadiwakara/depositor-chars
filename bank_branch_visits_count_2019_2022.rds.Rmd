@@ -112,7 +112,9 @@ visits_summary <- visits_summary[NEW_PLACEKEY %in% sod$NEW_PLACEKEY]
 visits_summary <- visits_summary[,.(RAW_VISIT_COUNTS=sum(RAW_VISIT_COUNTS,na.rm=T),
                                     RAW_VISITOR_COUNTS = sum(RAW_VISITOR_COUNTS,na.rm=T),
                                     DISTANCE_FROM_HOME = mean(DISTANCE_FROM_HOME,na.rm=T),
-                                    MEDIAN_DWELL = mean(MEDIAN_DWELL,na.rm=T)
+                                    MEDIAN_DWELL = mean(MEDIAN_DWELL,na.rm=T),
+                                    android = sum(android,na.rm=T),
+                                    ios = sum(ios,na.rm=T)
                                     ),
                                  by=.(NEW_PLACEKEY,DATE_RANGE_START)]
 
